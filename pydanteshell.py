@@ -18,9 +18,12 @@ selftest comprueba.
     python pydanteshell.py --demo 4     # ver la solución del nivel 4
     python pydanteshell.py --level 33   # ir directo al Cocito
     python pydanteshell.py --all        # desbloquear la Commedia entera
+    python pydanteshell.py --export-levels niveles/   # los 101 niveles en JSON
+    python pydanteshell.py --custom mi_nivel.json     # jugar un nivel propio
 
 Ratón y teclado: 1–8 oficio · clic asignar · QWERTYUI palle · clic derecho naranja ·
-D Privilegio di Dioneo · F avance · Espacio pausa · Supr 2 s Dies Irae.
+D Privilegio di Dioneo · C segundo intento (Purgatorio) · Tab artista del Mecenate ·
+F avance · Espacio pausa · Supr 2 s Dies Irae.
 Mando (SDL GameController): stick izq. cursor · A asignar · LB/RB oficio · X naranja ·
 cruceta + Y palle · LT/RT cadenza · Start pausa · Select Dioneo · Select+Start 2 s Dies Irae.
 """
@@ -33,6 +36,7 @@ import math
 import os
 import random
 import sys
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -701,6 +705,8 @@ class Level:
     guide: str = "Virgilio"
     target_pct: int = 50
     phantoms: tuple[tuple[int, int, int, int, str, bool], ...] = ()  # (x0, y0, x1, y1, tipo, del revés)
+    boats: tuple[tuple[int, int, int], ...] = ()  # (x0, x1, y) del tramo de fango
+    liquid: tuple[int, int, int] | None = None
     trees: tuple[tuple[int, int], ...] = ()
     sabios: tuple[tuple[int, int, str, str], ...] = ()
 
@@ -714,6 +720,8 @@ DIFFICULTIES = ["Penitente", "Pellegrino", "Disciplinato", "Dannato"]
 GUARDS = {
     # tipo: (nombre, qué palla lo aplaca, abre solo tras N s [0 = nunca], frase)
     "lupa": ("La lupa", "arancia", 0, "«...una lupa, che di tutte brame / sembiava carca». Distráela."),
+    "lonza": ("La lonza", None, 0, "«…una lonza leggera e presta molto». Por aquí no se pasa."),
+    "leone": ("Il leone", None, 0, "«…con la test'alta e con rabbiosa fame». Tampoco por aquí: «a te convien tenere altro viaggio»."),
     "caronte": ("Caronte", "cambio", 0, "«Caron dimonio, con occhi di bragia». Paga el óbolo."),
     "minosse": ("Minosse", "cambio", 0, "Minos juzga y ciñe la cola. Se deja convencer."),
     "cerbero": ("Cerbero", "arancia", 0, "Tres bocas. Virgilio le echó tierra; tú, una naranja."),
@@ -726,7 +734,7 @@ GUARDS = {
     "attesa": ("Gli Scomunicati", None, 30, "Los excomulgados esperan. Esperar también es trabajo."),
     "angelo": ("L'Angelo portiere", None, 15, "El ángel abre a quien espera. La gracia no se compra."),
     "pietro": ("San Pietro", None, 20, "Examen de fe. Espera la pregunta."),
-    "anteo": ("Anteo", None, 0, "Anteo, sin cadenas: «Ponci giù». Llega a su mano y te baja al fondo."),
+    "anteo": ("Anteo", None, 0, "Anteo, sin cadenas: «mettine giù». Llega a su mano y te baja al fondo."),
     "giacomo": ("San Giacomo", None, 20, "Examen de esperanza."),
     "giovanni": ("San Giovanni", None, 20, "Examen de caridad."),
 }
@@ -750,7 +758,7 @@ def place_info(i: int) -> dict:
         P.update(place="Florencia, 1348", canto="Proemio", theme="firenze", name="La città dolente",
                  palette=["wall", "dig"], moria=(2, True), special="child")
     elif i == 1:
-        P.update(place="Selva oscura", canto="Inf. I", theme="selva", name="Nel mezzo del cammin", guards=["lupa"],
+        P.update(place="Selva oscura", canto="Inf. I", theme="selva", name="Nel mezzo del cammin", special="selva",
                  palette=["wall"])
     elif i <= 3:
         P.update(place="Antinferno", canto="Inf. III", theme="acheronte", name="Gli ignavi", palette=["wall", "dig", "drop_mine"],
@@ -772,7 +780,7 @@ def place_info(i: int) -> dict:
                  guards=["pluto"] if i == 9 else [], palette=["wall", "drop_mine", "dig"], extra=["boulders"])
     elif i <= 12:
         P.update(place="V · Iracondi", canto="Inf. VII–VIII", theme="fango", name="La palude Stigia",
-                 guards=["flegias"] if i == 11 else [], palette=["pit", "wall", "drop_float"])
+                 guards=["flegias"] if i == 11 else [], palette=["boat", "wall", "drop_float"])
     elif i <= 14:
         P.update(place="Città di Dite", canto="Inf. VIII–IX", theme="dite", name="Le mura di Dite",
                  guards=["furie"] if i == 13 else [], palette=["wall", "dig", "drop_mine"])
@@ -793,9 +801,9 @@ def place_info(i: int) -> dict:
                  palette=["drop_float", "drop_float"])
     elif i <= 31:
         bolge = [
-            ("Adulatori", "Inf. XVIII", set()), ("Simoniaci", "Inf. XIX", {"vents"}), ("Indovini", "Inf. XX", {"backwards"}),
-            ("Barattieri", "Inf. XXI–XXII", set()), ("Ipocriti", "Inf. XXIII", {"slowskills"}),
-            ("Ladri", "Inf. XXIV–XXV", set()), ("Consiglieri fraudolenti", "Inf. XXVI–XXVII", set()),
+            ("Adulatori", "Inf. XVIII", {"sterco"}), ("Simoniaci", "Inf. XIX", {"vents"}), ("Indovini", "Inf. XX", {"backwards"}),
+            ("Barattieri", "Inf. XXI–XXII", {"pece"}), ("Ipocriti", "Inf. XXIII", {"slowskills", "piombo"}),
+            ("Ladri", "Inf. XXIV–XXV", {"snakes"}), ("Consiglieri fraudolenti", "Inf. XXVI–XXVII", {"flames"}),
             ("Seminatori di discordia", "Inf. XXVIII", set()), ("Falsari", "Inf. XXIX–XXX", {"moria2"}),
         ]
         nm, canto, m = bolge[i - 23]
@@ -877,6 +885,10 @@ def place_info(i: int) -> dict:
             P["palette"] = ["drop_float", "wall"]
         if sky == "venere":
             P["mods"] = {"lux", "venus"}
+        if sky == "marte":
+            P["extra"] = ["croce"]
+        if sky == "giove":
+            P["extra"] = ["lettere"]
         if sky == "saturno":
             P["mods"] = {"lux", "silence"}
             P["palette"] = ["wall", "climb"]
@@ -912,6 +924,7 @@ class MapBuilder:
         self.guards: list[GuardSpec] = []
         self.vents: list[tuple[int, int, int]] = []
         self.boulders: list[tuple[int, int, int]] = []
+        self.boats: list[tuple[int, int, int]] = []
         self.floaters = self.climbers = False
         self.flats: list[tuple[int, int]] = []  # (x, y) de suelo libre para coleccionables
         self.entrance: tuple[int, int] | None = None
@@ -1003,6 +1016,33 @@ class MapBuilder:
         self.descent += d
         self.flat(6)
 
+    def boat(self) -> None:
+        """La palude Stigia: ocho bloques de fango y la barca de Flegias."""
+        self.flat(6)
+        g = self.c * CELL
+        for _ in range(8):
+            col = self._col(self.fy + 3)
+            col[self.fy + 1] = col[self.fy + 2] = "~"
+        self.boats.append((g, g + 8 * CELL, self.fy * CELL))
+        self.flat(5)
+
+    def selva(self) -> None:
+        """Inf. I: tres caminos. Arriba esperan la lonza y el león; abajo, la loba."""
+        self.flat(4)
+        s = self.c
+        fy = self.fy
+        for _ in range(11):
+            col = self._col(fy + 6)
+            for r in range(fy, fy + 3):
+                col[r] = "#"
+        self.guards.append(GuardSpec("lonza", (s + 6) * CELL + 4, fy * CELL))
+        self.guards.append(GuardSpec("leone", (s + 9) * CELL + 4, fy * CELL))
+        self.rules.append(Rule(Skill.BECCHINO, x=(s + 2) * CELL + 4, win=self.win))
+        self._need(Skill.BECCHINO)
+        self.fy += 6
+        self.descent += 6
+        self.flat(3)
+
     def drop_anteo(self, d: int) -> None:
         """El pozo de los gigantes: Anteo recoge a quien llega al borde y lo deja abajo."""
         self.flat(4)
@@ -1058,8 +1098,13 @@ class MapBuilder:
             self.pickups.append(PickSpec(needs, self.c * CELL + 4, self.fy * CELL, need=True))
         self.flat(9, spot=False)
         gi = len(self.guards)
+        gcol = self.c
         self.guards.append(GuardSpec(kind, self.c * CELL + 4, self.fy * CELL))
-        self.flat(5, spot=False)
+        self.flat(6 if kind == "caronte" else 5, spot=False)
+        if kind == "caronte":
+            # el rodeo durísimo: una pasarela sobre Caronte; solo se llega con escalera
+            for k in range(gcol - 4, gcol + 6):
+                self.cols[k][self.fy - 2] = "_"
         if needs and needs != "giunco":
             self.rules.append(Rule(None, palla=needs, guard=gi))
 
@@ -1127,6 +1172,8 @@ HINTS = {
     "climb": "Un muro alto sin otra salida: Pellegrini, todos.",
     "climb_up": "Una cornisa vertical: solo el bordón del Pellegrino sube por ella.",
     "ascend": "Una cornisa a dos bloques: doce ladrillos de Capomastro, empezando a tiempo.",
+    "boat": "La palude Stigia: la barca de Flegias lleva a unos pocos cada vez. Sin óbolo no zarpa.",
+    "selva": "Tres caminos: la lonza y el león cierran el de arriba. Virgilio: «a te convien tenere altro viaggio».",
     "drop_anteo": "El pozo de los gigantes: Anteo baja a quien llega al borde. No hace falta oficio, solo paciencia.",
 }
 
@@ -1177,10 +1224,10 @@ def build_level(i: int) -> Level:
         pits = 0
         for k in range(n_obst):
             choice = palette[k] if k < len(palette) and k < 2 else rng.choice(palette)
-            if choice == "pit":
+            if choice in ("pit", "boat"):
                 if pits or "fast" in mods:
                     choice = "wall"
-                pits += 1 if choice == "pit" else 0
+                pits += 1 if choice in ("pit", "boat") else 0
             seq.append(choice)
     if P["special"] == "lucifero":
         return _lucifero(i, P, mods, total, tier, rng)
@@ -1211,9 +1258,16 @@ def build_level(i: int) -> Level:
             kept.append(s)
         seq = kept
         fy = 33
+    if P["special"] == "selva":
+        seq = ["selva"]
+        fy = 16
     mb = MapBuilder(fy, mods)
     mb.start()
     guards = list(P["guards"])
+    if P["special"] == "selva":
+        mb.selva()
+        mb.guardian("lupa")
+        seq = []
     if P["special"] == "rogo":
         mb.flat(4)
     if cantica == "purgatorio" and "catone" in guards:
@@ -1243,6 +1297,8 @@ def build_level(i: int) -> Level:
                 mb.ascend()
             case "drop_anteo":
                 mb.drop_anteo(rng.randint(9, 11))
+            case "boat":
+                mb.boat()
         if "vents" in P["extra"] and k == 0:
             mb.vent_row(2 + tier // 2)
         if "boulders" in P["extra"] and k == 0:
@@ -1398,6 +1454,11 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
     if P["special"] == "rogo":  # más pagine que salvar de la hoguera
         for x, y in flats[:2]:
             pickups.append(PickSpec("pagina", x, y))
+    for kind in ("lettere", "croce"):
+        if kind in P["extra"]:
+            while len(mb.cols) < VIEW_W // CELL:
+                mb._col()
+            _sky_glyphs(mb, kind)
     vault = cantica == "inferno" and not mb.climbers and P["theme"] not in ("limbo",)
     rows = mb.rows(random.Random(i * 13 + 1) if vault else None)
     guards = tuple(mb.guards)
@@ -1408,7 +1469,7 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
         phantoms = [(a, b, c, d, k, True) for a, b, c, d, k, _ in phantoms]
     width = len(rows[0]) * CELL
     walk_s = width / TPS
-    minutes = math.ceil((walk_s * 1.6 + total * release_interval(rr) / TPS + 50 + 25 * len(mb.guards)
+    minutes = math.ceil((walk_s * 1.6 + total * release_interval(rr) / TPS + 50 + 25 * len(mb.guards) + 120 * len(mb.boats)
                          + (40 if "night" in mods else 0)) / 60) + (2 if "slowskills" in mods else 1)
     target = [50, 60, 70, 80][tier] if i else 40
     if P["special"] == "final":
@@ -1420,6 +1481,10 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
     if P["special"] == "rogo":
         fire = (55 * TPS, 0.10)
     hint_bits = [HINTS[s] for s in dict.fromkeys(seq) if s in HINTS][:2]
+    if P["special"] == "selva":
+        hint_bits = [HINTS["selva"], HINTS["dig"]]
+    if any(g.kind == "caronte" for g in mb.guards):
+        hint_bits.append("O el rodeo durísimo: una escalera de Capomastro hasta la pasarela que pasa sobre Caronte.")
     if mb.guards:
         hint_bits.append(GUARDS[mb.guards[0].kind][3])
     if flip:
@@ -1435,9 +1500,43 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
         difficulty=DIFFICULTIES[tier], total=total, to_save=to_save, rr=rr, minutes=minutes, skills=skills,
         theme=P["theme"], map=rows, solution=tuple(rules), pickups=tuple(pickups), guards=guards,
         vents=tuple(mb.vents), boulders=tuple(mb.boulders), mods=frozenset(mods), moria=P["moria"], fire=fire,
+        boats=tuple(mb.boats), liquid=LIQUIDS.get(next((m for m in mods if m in LIQUIDS), ""), None),
         sermon=SERMONS[i % len(SERMONS)], hint=hint, sky=P["sky"], special=P["special"], guide=guide,
         target_pct=target, phantoms=tuple(phantoms), trees=tuple(trees), sabios=tuple(sabios),
     )
+
+
+LIQUIDS = {"sterco": (96, 70, 30), "pece": (22, 16, 24)}
+
+# Letras de luz del cielo de Júpiter (Par. XVIII), 3×5 bloques
+GLYPHS = {
+    "D": ["##.", "#.#", "#.#", "#.#", "##."], "I": ["###", ".#.", ".#.", ".#.", "###"],
+    "L": ["#..", "#..", "#..", "#..", "###"], "G": [".##", "#..", "#.#", "#.#", ".##"],
+    "T": ["###", ".#.", ".#.", ".#.", ".#."], "E": ["###", "#..", "##.", "#..", "###"],
+    "U": ["#.#", "#.#", "#.#", "#.#", "###"], "S": [".##", "#..", ".#.", "..#", "##."],
+    "A": [".#.", "#.#", "###", "#.#", "#.#"], "M": ["#.#", "###", "###", "#.#", "#.#"],
+}
+
+
+def _sky_glyphs(mb: MapBuilder, kind: str) -> None:
+    """Escribe en lo alto del marco (abajo en el Paraíso) las letras o la cruz de luz."""
+    if kind == "lettere":
+        text, c0 = "DILIGITE IUSTITIAM", 6
+        for ch in text:
+            if ch != " " and c0 + 3 < len(mb.cols):
+                for r, row in enumerate(reversed(GLYPHS[ch])):  # el marco se dará la vuelta
+                    for k, v in enumerate(row):
+                        if v == "#" and mb.cols[c0 + k][1 + r] == ".":
+                            mb.cols[c0 + k][1 + r] = "#"
+            c0 += 4
+    elif kind == "croce":
+        mid = len(mb.cols) // 2
+        for r in range(0, 6):
+            if mb.cols[mid][r] == ".":
+                mb.cols[mid][r] = "#"
+        for k in range(mid - 4, mid + 5):
+            if 0 <= k < len(mb.cols) and mb.cols[k][3] == ".":
+                mb.cols[k][3] = "#"
 
 
 SABIOS = [
@@ -1516,12 +1615,19 @@ def parse_map(rows: tuple[str, ...]):
 # Calibración: almas que salva la solución de referencia en cada nivel, en el peor
 # caso entre una Compagnia ligera y otra cargada (python pydanteshell.py --calibrate).
 # El mínimo exigido nunca la supera.
-CALIBRATION: dict[int, int] = {0: 21, 1: 20, 2: 21, 3: 21, 4: 20, 5: 22, 6: 22, 7: 19, 8: 22, 9: 12, 10: 17, 11: 22, 12: 23, 13: 24, 14: 24, 15: 19, 16: 22, 17: 24, 18: 24, 19: 26, 20: 26, 21: 17, 22: 27, 23: 25, 24: 16, 25: 25, 26: 26, 27: 18, 28: 23, 29: 22, 30: 26, 31: 17, 32: 30, 33: 29, 34: 30, 35: 30, 36: 31, 37: 31, 38: 31, 39: 32, 40: 32, 41: 32, 42: 33, 43: 33, 44: 33, 45: 34, 46: 34, 47: 34, 48: 34, 49: 35, 50: 35, 51: 35, 52: 36, 53: 36, 54: 36, 55: 28, 56: 24, 57: 34, 58: 37, 59: 38, 60: 38, 61: 19, 62: 34, 63: 26, 64: 29, 65: 30, 66: 40, 67: 40, 68: 40, 69: 41, 70: 41, 71: 41, 72: 42, 73: 42, 74: 42, 75: 42, 76: 43, 77: 43, 78: 43, 79: 44, 80: 44, 81: 44, 82: 45, 83: 45, 84: 45, 85: 46, 86: 46, 87: 46, 88: 46, 89: 47, 90: 47, 91: 47, 92: 48, 93: 48, 94: 48, 95: 48, 96: 49, 97: 49, 98: 49, 99: 50, 100: 100}
+CALIBRATION: dict[int, int] = {0: 21, 1: 20, 2: 21, 3: 21, 4: 20, 5: 22, 6: 22, 7: 19, 8: 22, 9: 12, 10: 17, 11: 23, 12: 24, 13: 24, 14: 24, 15: 19, 16: 22, 17: 24, 18: 24, 19: 26, 20: 26, 21: 17, 22: 27, 23: 25, 24: 16, 25: 25, 26: 26, 27: 18, 28: 16, 29: 22, 30: 26, 31: 17, 32: 30, 33: 29, 34: 30, 35: 30, 36: 31, 37: 31, 38: 31, 39: 32, 40: 32, 41: 32, 42: 33, 43: 33, 44: 33, 45: 34, 46: 34, 47: 34, 48: 34, 49: 35, 50: 35, 51: 35, 52: 36, 53: 36, 54: 36, 55: 28, 56: 24, 57: 34, 58: 37, 59: 38, 60: 38, 61: 19, 62: 34, 63: 26, 64: 29, 65: 30, 66: 40, 67: 40, 68: 40, 69: 41, 70: 41, 71: 41, 72: 42, 73: 42, 74: 42, 75: 42, 76: 43, 77: 43, 78: 43, 79: 44, 80: 44, 81: 44, 82: 45, 83: 45, 84: 45, 85: 46, 86: 46, 87: 46, 88: 46, 89: 47, 90: 47, 91: 47, 92: 48, 93: 48, 94: 48, 95: 48, 96: 49, 97: 49, 98: 49, 99: 50, 100: 100}
+
+
+CUSTOM: dict[int, Level] = {}  # niveles cargados desde JSON (id ≥ 1000)
 
 
 @lru_cache(maxsize=None)
-def get_level(i: int) -> Level:
+def _built(i: int) -> Level:
     return build_level(i)
+
+
+def get_level(i: int) -> Level:
+    return CUSTOM[i] if i in CUSTOM else _built(i)
 
 
 N_LEVELS = 101
@@ -1706,6 +1812,19 @@ class World:
         self.trees = list(level.trees)
         self.sabios = [list(s) + [False] for s in level.sabios]
         self.lonely: set[int] = set()
+        self.boats = [{"xa": x0, "xb": x1 - 24, "y": y, "x": x0, "dir": 1, "wait": 70} for x0, x1, y in level.boats]
+        for b in self.boats:
+            self._boat_paint(b["x"], b["x"] + 24, b["y"], True)
+        self.snakes: list[list[int]] = []
+        if "snakes" in self.mods:
+            for k in range(2):
+                x = int(self.tn.w * (0.4 + 0.25 * k))
+                y = self._floor_at(x)
+                if y is not None:
+                    self.snakes.append([x, y, 1 if k % 2 else -1])
+        self.snake_said = False
+        self.primum_said = False
+        self.tempo_used = False
         if "fake" in self.mods:
             reds = [p for p in self.pickups if p.kind in RED_PALLE and not p.need]
             if len(reds) > 1:
@@ -1753,7 +1872,7 @@ class World:
         self.notes: list[str] = []
         self.art_queue: list[str] = []
         if self.toll:
-            self.say(f"El Cocito cobra la traición: {self.toll} alma(s) quedan presas en el hielo de la Antenora.", "Virgilio")
+            self.say("El Cocito cobra la traición: {n} alma(s) quedan presas en el hielo de la Antenora.", "Virgilio", n=self.toll)
         if level.special == "bulla":
             self.say("Aviñón, 20 de octubre de 1349: la bula de Clemente VI condena a los flagelantes.", "Virgilio")
         if level.special == "lucifero":
@@ -1777,8 +1896,9 @@ class World:
                 return y
         return None
 
-    def say(self, text: str, who: str = "") -> None:
-        self.messages.append([text, 6 * TPS + len(text) * 2, who])
+    def say(self, text: str, who: str = "", **kw) -> None:
+        """Una voz en la escena. El texto es una plantilla: la interfaz la traduce."""
+        self.messages.append([text, 6 * TPS + len(text) * 2, who, kw])
         self.msg_serial += 1
 
     def emit(self, ev: tuple) -> None:
@@ -1909,6 +2029,10 @@ class World:
                 return True
             case ("palla", slot, x, y):
                 return self.use_palla(int(slot), int(x), int(y))
+            case ("mecenate", slot, x, y, artist):
+                return self.use_palla(int(slot), int(x), int(y), str(artist))
+            case ("tempo", slot):
+                return self.buy_time(int(slot))
             case ("swap", slot, a, b):
                 return self.swap(int(slot), int(a), int(b))
             case ("return", slot):
@@ -1976,7 +2100,18 @@ class World:
         self.events.append("palla")
         return kind
 
-    def use_palla(self, slot: int, x: int, y: int) -> bool:
+    def buy_time(self, slot: int) -> bool:
+        """Purgatorio: un bezante compra un segundo intento de la cornisa."""
+        if self.cantica != "purgatorio" or self.tempo_used or not 0 <= slot < len(self.shield) or self.shield[slot] != "cambio":
+            return False
+        self._spend(slot)
+        self.tempo_used = True
+        self.time_left += int(self.time_total * 0.4)
+        self.notes.append("Segundo intento comprado: +2 de Peso")
+        self.say("Un bezante compra un segundo intento de la cornisa: más días, +2 de Peso.", "")
+        return True
+
+    def use_palla(self, slot: int, x: int, y: int, artist: str | None = None) -> bool:
         if not 0 <= slot < len(self.shield):
             return False
         kind = self.shield[slot]
@@ -2001,7 +2136,7 @@ class World:
                 self._spend(slot)
                 self.emit(("orange", x, y))
                 if g is not None and g.needs == "arancia":
-                    self._pacify(g, f"{g.name} se arroja sobre la naranja. El paso queda libre.")
+                    self._pacify(g, "{name} se arroja sobre la naranja. El paso queda libre.")
                     return True
                 t = LURE_TICKS * (2 if "lure_long" in self.mods else 1)
                 self.lure = [x, y, t]
@@ -2019,10 +2154,14 @@ class World:
                 self.corpses = [c for c in self.corpses if (c[0] - x) ** 2 + (c[1] - y) ** 2 > 48 * 48]
                 self.emit(("cure", x, y))
                 self.events.append("cure")
-                self.say(f"Cosme y Damián: {n} curados. Quince segundos de inmunidad.", "")
+                self.say("Cosme y Damián: {n} curados. Quince segundos de inmunidad.", "", n=n)
                 return True
             case "mecenate":
-                artist = self.pick_artist(slot)
+                if artist in ARTISTS:
+                    if self.art_queue:
+                        self.art_queue.pop(0)
+                else:
+                    artist = self.pick_artist(slot)
                 self._spend(slot)
                 if artist == "brunelleschi":
                     col = np.array((236, 204, 150), dtype=np.uint8)
@@ -2052,7 +2191,7 @@ class World:
                 if g is None:
                     return False
                 self._spend(slot)
-                self._pacify(g, f"26 de abril de 1478. {g.name} se vuelve contra los suyos. Dante lo anota.")
+                self._pacify(g, "26 de abril de 1478. {name} se vuelve contra los suyos. Dante lo anota.")
                 return True
             case "giglio":
                 if self.level.special == "final":
@@ -2064,6 +2203,9 @@ class World:
                     return True
                 return False
         return False
+
+    def next_artist(self) -> str:
+        return self.art_queue[0] if self.art_queue else ARTISTS[(self.level.id + sum(self.used.values())) % 3]
 
     def pick_artist(self, slot: int) -> str:
         """El artista de cada Palla del Mecenate se decide al recogerla."""
@@ -2100,7 +2242,7 @@ class World:
         g.pacified = True
         self.fx.append(("pacify", g.x, VIEW_H + 11 - g.y if g.inv else g.y - 12))
         self.events.append("bribe")
-        self.say(msg, g.name)
+        self.say(msg, g.name, name=g.name)
 
     # ── tick ─────────────────────────────────────────────────────────────
     def tick(self) -> None:
@@ -2131,6 +2273,7 @@ class World:
         self.blockers = [(L.x, L.y, BLOCK_RANGE, L.inv) for L in self.lemmings
                          if L.state == St.BLOCK and not L.removed and "paradiso" not in self.mods]
         self.blockers += [(g.x, g.y, GUARD_RANGE, g.inv) for g in self.guards if not g.pacified]
+        self._boats()
         night = self.night
         self._phantoms()
         self._banner()
@@ -2163,6 +2306,7 @@ class World:
         if self.tick_count % 4 == 0:
             self._contagion()
         self._rats()
+        self._snakes()
         self._vents_boulders()
         self._guards()
         self._corpses()
@@ -2323,6 +2467,9 @@ class World:
                     if L.maestro:
                         self.maestro_saved = True
                         self.say("El Maestro cruza la puerta. «Ya os lo dije: el látigo salva.»", "Il Maestro")
+                        if self.alive:
+                            self.combo = max(self.combo, COMBO_TICKS)  # el resto lo sigue con más ritmo
+                            self.say("El Maestro ha llegado: el resto lo sigue con más ritmo.", "")
                     else:
                         self.saved += 1
                     self.events.append("yippee")
@@ -2671,14 +2818,14 @@ class World:
                         self.say(GUARDS[g.kind][3], g.name)
                         break
             if g.kind == "catone" and self.giunco:
-                self._pacify(g, "Catón ve el junco ceñido. «Andate, e fate che questo uom tu cinghe».")
+                self._pacify(g, "Catón ve el junco ceñido: «Va dunque, e fa che tu costui ricinghe / d'un giunco schietto» (Purg. I).")
             elif auto and g.touched:
                 g.timer += 1
                 if g.timer >= auto * TPS:
                     if g.kind == "furie":
                         self._pacify(g, "Llega el messo del cielo: la puerta de Dite se abre con una varita.")
                     else:
-                        self._pacify(g, f"{g.name}: «Pasad». La espera era la prueba.")
+                        self._pacify(g, "{name}: «Pasad». La espera era la prueba.")
 
     def _corpses(self) -> None:
         for c in self.corpses:
@@ -2779,6 +2926,17 @@ class World:
         if L.state in EXITABLE:
             for e in self.exits:
                 if e.inv == L.inv and abs(L.x - e.x) <= 3 and e.y - 8 <= L.y <= e.y + 1:
+                    if self.level.special == "primum" and self.peso > 0 and not L.maestro:
+                        # con Peso no se asciende: cada alma que llega quema un punto y vuelve
+                        self.peso -= 1
+                        L.dir = -L.dir
+                        L.x += 4 * L.dir
+                        self.emit(("cure", L.x, L.y - 8))
+                        if not self.primum_said:
+                            self.primum_said = True
+                            self.say("Con Peso no se asciende: cada alma que llega quema un punto ({n} restantes).", "Beatrice",
+                                     n=self.peso)
+                        return
                     L.bomb = None
                     self._set(L, St.EXIT)
                     return
@@ -2793,13 +2951,93 @@ class World:
             self.events.append("pagina")
         if self.level.special == "flame" and not self.flame_said and L.maestro and L.x > self.terrain.w // 2:
             self.flame_said = True
-            self.say("Una de las llamas habla con la voz del Maestro: «…e consigliai frode».", "")
+            self.say("Una de las llamas habla con la voz del Maestro. Dice que él solo dio consejo.", "")
         if self.lume:
             lx, ly, _ = self.lume
             # haz diagonal de arriba-derecha a abajo-izquierda que pasa por (lx, ly)
             d = abs((L.x - lx) + (self.ry(L) - ly)) / 1.4142
             if d < 22:
                 L.fervor = 0
+
+    def _boat_paint(self, x0: int, x1: int, y: int, on: bool) -> None:
+        t = self.tn
+        x0, x1 = max(0, x0), min(t.w, x1)
+        if x0 >= x1:
+            return
+        reg = t.k[y : y + 4, x0:x1]
+        if on:
+            m = reg == AIR
+            reg[m] = DIRT
+            shade = np.array([(120, 84, 50), (100, 70, 42), (86, 60, 36), (60, 42, 28)], dtype=np.uint8)
+            for k in range(4):
+                row = t.c[y + k, x0:x1]
+                row[m[k]] = shade[k]
+        else:
+            reg[reg == DIRT] = AIR
+        t._mark(x0, y, x1, y + 4)
+
+    def _boats(self) -> None:
+        """Inf. VIII: la barca de Flegias va y viene por la Estigia; quien está encima viaja."""
+        if not self.boats:
+            return
+        for b in self.boats:
+            x, y = b["x"], b["y"]
+            # Flegias, en la orilla de salida, no zarpa sin el óbolo
+            held = any(g.kind == "flegias" and not g.pacified and g.x < b["xa"] for g in self.guards)
+            if b["wait"] > 0:
+                b["wait"] -= 1
+            elif not held:
+                d = b["dir"]
+                for L in self.lemmings:
+                    if not L.removed and not L.inv and L.y == y and x <= L.x < x + 24 and L.state not in AIRBORNE:
+                        L.x += d
+                if d > 0:
+                    self._boat_paint(x, x + 1, y, False)
+                    self._boat_paint(x + 24, x + 25, y, True)
+                else:
+                    self._boat_paint(x + 23, x + 24, y, False)
+                    self._boat_paint(x - 1, x, y, True)
+                b["x"] = x = x + d
+                if x in (b["xa"], b["xb"]):
+                    b["dir"] = -d
+                    b["wait"] = 45
+            at_left, at_right = x == b["xa"], x == b["xb"]
+            if not at_left:
+                self.blockers.append((b["xa"], y, BLOCK_RANGE, False))  # muelle izquierdo
+                self.blockers.append((x - 1, y, BLOCK_RANGE, False))  # proa
+            if not at_right:
+                self.blockers.append((b["xb"] + 23, y, BLOCK_RANGE, False))  # muelle derecho
+                self.blockers.append((x + 24, y, BLOCK_RANGE, False))  # popa
+
+    def _snakes(self) -> None:
+        """Inf. XXIV–XXV: entre los ladrones, quien toca una serpiente se vuelve serpiente."""
+        if not self.snakes:
+            return
+        t = self.tn
+        if self.tick_count % 3 == 0:
+            for r in self.snakes:
+                nx = r[0] + r[2]
+                if not (0 < nx < t.w - 1) or t.solid(nx, r[1] - 2) or not t.solid(nx, r[1]) and not t.solid(nx, r[1] + 1):
+                    r[2] = -r[2]
+                    continue
+                r[0] = nx
+                if not t.solid(nx, r[1]):
+                    r[1] += 1
+                elif t.solid(nx, r[1] - 1):
+                    r[1] -= 1
+        for L in self.lemmings:
+            if L.removed or L.inv or L.state != St.WALK or L.maestro or L.child:
+                continue
+            for r in self.snakes:
+                if abs(L.x - r[0]) <= 3 and abs(L.y - r[1]) <= 3 and self.rng.random() < 0.004:
+                    self.fx.append(("infect", L.x, L.y - 6))
+                    self._kill(L, St.SPLAT)
+                    if len(self.snakes) < 5:
+                        self.snakes.append([L.x, L.y, -L.dir])
+                    if not self.snake_said:
+                        self.snake_said = True
+                        self.say("Un ladrón se vuelve serpiente (Inf. XXV).", "Virgilio")
+                    break
 
     def _phantoms(self) -> None:
         if not self.phantoms:
@@ -2899,7 +3137,7 @@ class World:
                 self.skills[s] += 1
                 self.emit(("pickup", p.x, p.y - 6, (190, 230, 190)))
                 self.events.append("pagina")
-                self.say(f"Neifile: «con ingenio». Un {SKILL_NAMES[s]} más escondido en el camino.", "Neifile")
+                self.say("Neifile: «con ingenio». Un {skill} más escondido en el camino.", "Neifile", skill=SKILL_NAMES[s])
                 continue
             if p.kind == "pagina":
                 p.taken = True
@@ -2928,7 +3166,7 @@ class World:
                 # la que exige el guardián entra siempre: otra cede su hueco
                 out = next((k for k, q in enumerate(self.shield) if q != "giglio"), 0)
                 gone = self.shield.pop(out)
-                self.say(f"El escudo está lleno: la {PALLE_INFO[gone][0]} cede su hueco.", "")
+                self.say("El escudo está lleno: la {palla} cede su hueco.", "", palla=PALLE_INFO[gone][0])
             p.taken = True
             self.shield.append(p.kind)
             if p.kind == "mecenate":
@@ -3744,7 +3982,7 @@ class Renderer:
         if liq.any():
             top = liq.copy()
             top[1:] &= ~liq[:-1]
-            base = np.array(th.liquid, dtype=float)
+            base = np.array(self.world.level.liquid or th.liquid, dtype=float)
             for k in range(4):
                 col = np.zeros((h, w, 3))
                 xx = np.arange(w)
@@ -3994,6 +4232,8 @@ class Renderer:
                 img = self.sp.tinted(img, (190, 210, 120))
             if Lm.state == St.BURN:
                 img = self.sp.tinted(img, (255, 150, 60))
+            elif "piombo" in w.mods and not Lm.maestro:  # «di fuor dorate son… ma dentro tutte piombo»
+                img = self.sp.tinted(img, (215, 190, 120))
             ax = img.get_width() // 2 - (0 if d > 0 else 1)
             x, y = Lm.x - ax - cam, Lm.y - img.get_height() + 1 + dy
             if Lm.state == St.EXIT:
@@ -4035,6 +4275,10 @@ class Renderer:
             x0 = v[0] - cam
             pygame.draw.rect(view, (70, 60, 56), (x0 - 2, v[2] - 3, v[1] - v[0] + 4, 3))
             pygame.draw.rect(view, (30, 20, 18), (x0, v[2] - 2, v[1] - v[0], 2))
+            for leg in (-3, 3):  # Inf. XIX: los simoníacos, cabeza abajo, con los pies fuera
+                lx = (v[0] + v[1]) // 2 - cam + leg
+                pygame.draw.line(view, (200, 150, 120), (lx, v[2] - 3), (lx + leg // 3, v[2] - 10), 2)
+                view.fill((255, 200, 80) if on or frame % 8 < 4 else (255, 120, 40), (lx + leg // 3 - 1, v[2] - 12, 3, 2))
             if on:
                 for k in range(v[1] - v[0]):
                     h = 6 + int(6 * abs(math.sin(frame * 0.5 + k)))
@@ -4144,6 +4388,31 @@ class Renderer:
             elif frame % 40 < 30:
                 for xx in range(x0, x1, 3):
                     view.fill((150, 150, 170), (xx - cam, y0, 1, 1))
+        for b in w.boats:  # Flegias a popa, con el remo
+            fx_ = b["x"] - cam + (2 if b["dir"] < 0 else 20)
+            by = b["y"]
+            pygame.draw.polygon(view, (50, 40, 46), [(fx_ - 3, by), (fx_ + 3, by), (fx_ + 2, by - 14), (fx_ - 2, by - 14)])
+            pygame.draw.circle(view, (150, 130, 120), (fx_, by - 16), 3)
+            view.fill((255, 70, 30), (fx_ - 1, by - 17, 1, 1))
+            sway = int(4 * math.sin(frame * 0.12))
+            pygame.draw.line(view, (110, 80, 50), (fx_ + 2, by - 12), (fx_ + 6 + sway, by + 6), 2)
+            lights.append((b["x"] + 12, by - 10, 60, (160, 140, 100)))
+        for r in w.snakes:  # las serpientes de los ladrones
+            x, y = r[0] - cam, r[1]
+            pts = [(x - k * r[2], y - 1 - int(1.5 * math.sin(frame * 0.4 + k))) for k in range(8)]
+            pygame.draw.lines(view, (70, 140, 60), False, pts, 2)
+            view.fill((230, 40, 30), (x + r[2], y - 2, 1, 1))
+        if "flames" in w.mods:  # los consejeros fraudulentos, cada uno en su llama
+            for k in range(6):
+                fxw = (k * 211 + frame * 0.2 * (1 if k % 2 else -1)) % w.tn.w
+                fy_ = w._floor_at(int(fxw) % w.tn.w) or VIEW_H - 10
+                x = int(fxw) - cam
+                if -10 < x < VIEW_W + 10:
+                    for j in range(5):
+                        h = 10 + int(4 * math.sin(frame * 0.3 + j + k))
+                        pygame.draw.line(view, (255, 160 - j * 20, 40), (x - 2 + j, fy_ - 1), (x - 2 + j, fy_ - h + abs(j - 2) * 2))
+                    glow.fill((90, 40, 8), (x // 4, (fy_ - 8) // 4, 2, 2), special_flags=pygame.BLEND_ADD)
+                    lights.append((int(fxw), fy_ - 8, 50, (255, 130, 40)))
         if w.level.id == 6:  # Paolo e Francesca, «che 'nsieme vanno»
             for k in range(2):
                 fx_ = (frame * 1.3 + k * 9) % (VIEW_W + 80) - 40
@@ -4298,12 +4567,19 @@ class Renderer:
             lights.append((g.x, y - 18, 70, (255, 250, 220)))
             eye_y = None
         else:  # lupa, minosse, pluto, centauri y demás
-            body = {"lupa": (90, 90, 96), "minosse": (70, 40, 40), "pluto": (90, 70, 40), "centauri": (120, 80, 50)}.get(k, (80, 50, 50))
-            if k in ("lupa", "centauri"):
+            body = {"lupa": (90, 90, 96), "minosse": (70, 40, 40), "pluto": (90, 70, 40), "centauri": (120, 80, 50),
+                    "lonza": (190, 150, 70), "leone": (176, 130, 60)}.get(k, (80, 50, 50))
+            if k in ("lupa", "centauri", "lonza", "leone"):
                 pygame.draw.ellipse(view, body, (x - 10, y - 12, 20, 9))
                 pygame.draw.circle(view, body, (x - 10, y - 14), 4)
                 for lx in (-7, -3, 4, 8):
                     view.fill(body, (x + lx, y - 4, 2, 4))
+                if k == "lonza":  # «di pel macolato era coverta»
+                    for sx_ in (-6, -1, 4):
+                        view.fill((70, 50, 20), (x + sx_, y - 10, 2, 2))
+                if k == "leone":
+                    pygame.draw.circle(view, (120, 80, 30), (x - 10, y - 14), 6)
+                    pygame.draw.circle(view, body, (x - 10, y - 14), 4)
                 if k == "centauri":
                     pygame.draw.rect(view, (200, 150, 110), (x - 12, y - 24, 4, 10))
                     pygame.draw.arc(view, (150, 110, 60), (x - 20, y - 26, 8, 14), -1.4, 1.4, 1)
@@ -4528,12 +4804,185 @@ def compose(style: str) -> np.ndarray:
     return np.zeros(int(SR * 2))
 
 
+# ── Voz: el italiano se lee casi como se escribe, así que unas reglas bastan ──
+_IT_VOW = "aeiou"
+FORMANTS = {
+    "a": (750, 1200, 2500), "e": (480, 1800, 2500), "i": (300, 2250, 3000), "o": (480, 850, 2400),
+    "u": (320, 750, 2300), "w": (320, 750, 2300), "j": (300, 2200, 3000), "m": (280, 1100, 2200),
+    "n": (280, 1600, 2600), "N": (280, 1900, 2700), "l": (360, 1300, 2700), "L": (300, 1900, 2700),
+    "r": (450, 1300, 1700), "v": (300, 1100, 2300), "z": (300, 1700, 2600), "dZ": (300, 1900, 2600),
+}
+
+
+def it_phonemes(text: str) -> list[str]:
+    """Grafemas italianos → fonemas sencillos. «." y "," son pausas."""
+    t = text.lower().translate(str.maketrans("àáèéìíòóùúâêîôû", "aaeeiioouuaeiou"))
+    out: list[str] = []
+    i, n = 0, len(t)
+
+    def at(k):
+        return t[k] if 0 <= k < n else "#"
+
+    def isv(ch):
+        return ch in _IT_VOW and ch != ""
+
+    while i < n:
+        c, nx = t[i], at(i + 1)
+        if c in ".;:!?«»":
+            out.append("||")
+        elif c in ", ":
+            out.append("|")
+        elif c in _IT_VOW:
+            if c == "i" and isv(nx) and not isv(at(i - 1)) and at(i - 1) != "|":
+                out.append("j")
+            elif c == "u" and at(i - 1) in "qg" and isv(nx):
+                out.append("w")
+            else:
+                out.append(c)
+        elif c == "c":
+            if nx == "h":
+                out.append("k")
+                i += 1
+            elif nx in "ei":
+                out.append("tS")
+                if nx == "i" and isv(at(i + 2)):
+                    i += 1
+            else:
+                out.append("k")
+        elif c == "g":
+            if nx == "h":
+                out.append("g")
+                i += 1
+            elif nx == "l" and at(i + 2) == "i":
+                out.append("L")
+                i += 2 if isv(at(i + 3)) else 1
+            elif nx == "n":
+                out.append("N")
+                i += 1
+            elif nx in "ei":
+                out.append("dZ")
+                if nx == "i" and isv(at(i + 2)):
+                    i += 1
+            else:
+                out.append("g")
+        elif c == "s":
+            if nx == "c" and at(i + 2) in "ei":
+                out.append("S")
+                i += 1
+                if at(i + 1) == "i" and isv(at(i + 2)):
+                    i += 1
+            elif isv(at(i - 1)) and isv(nx):
+                out.append("z")
+            else:
+                out.append("s")
+        elif c == "z":
+            out.append("ts")
+        elif c == "q":
+            out.append("k")
+        elif c == "x":
+            out += ["k", "s"]
+        elif c in "jy":
+            out.append("i")
+        elif c == "h":
+            pass
+        elif c.isalpha():
+            out.append(c if c in "bdfgklmnprstv" else "")
+        if out and len(out) >= 2 and out[-1] and out[-1] == out[-2] and out[-1] not in _IT_VOW and not out[-1].startswith("|"):
+            out[-1] = out[-1] + ":"  # consonante geminada
+            out.pop(-2)
+        i += 1
+    return [p for p in out if p]
+
+
+def _voiced(f0: float, fmts: tuple[int, int, int], dur: float, amp: float = 1.0) -> np.ndarray:
+    n = int(SR * dur)
+    if n <= 0:
+        return np.zeros(0)
+    t = np.arange(n) / SR
+    f = f0 * (1 + 0.004 * np.sin(math.tau * 5.5 * t))
+    phase = np.cumsum(f) / SR
+    out = np.zeros(n)
+    for h in range(1, int(4200 / f0) + 1):
+        fh = f0 * h
+        w = sum(math.exp(-((fh - F) / (90 + 30 * k)) ** 2) / (1 + k * 0.6) for k, F in enumerate(fmts)) + 0.02 / h
+        out += w * np.sin(math.tau * h * phase)
+    return out * amp
+
+
+def _hiss(dur: float, rng: np.random.Generator, color: str) -> np.ndarray:
+    n = int(SR * dur)
+    x = rng.uniform(-1, 1, n)
+    if color == "s":
+        x = np.diff(np.diff(x, prepend=0), prepend=0) * 0.5
+    elif color == "S":
+        x = np.diff(x, prepend=0)
+        x = np.convolve(x, np.ones(2) / 2, mode="same")
+    else:
+        x = np.convolve(x, np.ones(4) / 4, mode="same")
+    return x
+
+
+def synth_italian(text: str, f0: float) -> np.ndarray:
+    """Recitado sintético: fuente armónica + formantes, ruido para fricativas y explosiones."""
+    ph = it_phonemes(text)[:160]
+    rng = np.random.default_rng(len(text))
+    parts: list[np.ndarray] = []
+    total = max(1, len(ph))
+    for k, p in enumerate(ph):
+        gem = p.endswith(":")
+        p = p.rstrip(":")
+        prog = k / total
+        nxt = ph[k + 1] if k + 1 < len(ph) else "||"
+        pitch = f0 * (1.12 - 0.25 * prog)
+        if p in _IT_VOW:
+            long_ = nxt in ("|", "||") or (k + 2 < len(ph) and ph[k + 2] in ("|", "||"))
+            d = 0.12 if long_ else 0.072
+            if long_:
+                pitch *= 0.95
+            seg = _voiced(pitch, FORMANTS[p], d)
+        elif p in ("|", "||"):
+            seg = np.zeros(int(SR * (0.05 if p == "|" else 0.22)))
+        elif p in ("m", "n", "N", "l", "L", "w", "j", "v", "z"):
+            d = 0.05 * (1.8 if gem else 1)
+            seg = _voiced(pitch, FORMANTS[p], d, 0.45 if p in "mnN" else 0.7)
+            if p in "vz":
+                seg += _hiss(d, rng, "s" if p == "z" else "f") * 0.25
+        elif p == "r":
+            d = 0.055 * (1.8 if gem else 1)
+            seg = _voiced(pitch, FORMANTS["r"], d, 0.7)
+            seg *= 0.55 + 0.45 * np.sin(math.tau * 28 * np.arange(len(seg)) / SR)
+        elif p in ("f", "s", "S"):
+            d = 0.07 * (1.6 if gem else 1)
+            seg = _hiss(d, rng, p) * (0.35 if p == "f" else 0.55)
+        elif p in ("p", "t", "k", "b", "d", "g", "tS", "dZ", "ts"):
+            close = 0.04 * (1.8 if gem else 1)
+            seg = np.zeros(int(SR * close))
+            if p in ("b", "d", "g", "dZ"):
+                seg = _voiced(pitch, (250, 900, 2400), close, 0.25)
+            burst = _hiss(0.012, rng, "s" if p in ("t", "ts") else "S" if p in ("tS", "dZ") else "f")
+            burst *= np.linspace(1, 0, len(burst)) * 0.7
+            seg = np.concatenate([seg, burst])
+            if p in ("tS", "dZ", "ts"):
+                seg = np.concatenate([seg, _hiss(0.05, rng, "S" if p != "ts" else "s") * 0.45])
+        else:
+            continue
+        if len(seg) > 16:
+            fade = min(len(seg) // 3, int(SR * 0.006))
+            seg[:fade] *= np.linspace(0, 1, fade)
+            seg[-fade:] *= np.linspace(1, 0, fade)
+        parts.append(seg)
+    if not parts:
+        return np.zeros(1)
+    sig = np.concatenate(parts)
+    peak = np.abs(sig).max() or 1
+    return sig / peak * 0.8
+
+
 VOICE_PITCH = {
     "Virgilio": 108, "Il Maestro": 92, "Beatrice": 236, "San Bernardo": 118, "Savonarola": 128, "Matelda": 246,
     "Brunelleschi": 132, "Botticelli": 142, "Caravaggio": 116, "Dioneo": 152, "Filostrato": 128, "Panfilo": 138,
     "Pier della Vigna": 100, "L'Angelo": 300, "Caronte": 76, "Cerbero": 64, "Pluto": 70, "Minosse": 72,
 }
-_VOWEL = str.maketrans("àáèéìíòóùú", "aaeeiioouu")
 
 
 class Sfx:
@@ -4543,6 +4992,7 @@ class Sfx:
         self.vol = 0.8
         self.vch: pygame.mixer.Channel | None = None
         self._said: dict[tuple[str, str], pygame.mixer.Sound] = {}
+        self._voice_req: tuple[str, str] | None = None
         self.music_on = enabled
         self.sounds: dict[str, pygame.mixer.Sound] = {}
         self.tracks: dict[str, pygame.mixer.Sound] = {}
@@ -4600,26 +5050,28 @@ class Sfx:
                 ch.set_volume(self.vol)
 
     def speak(self, who: str, text: str) -> None:
-        """Un «italiano del Trecento» sin palabras: sílabas formánticas con la voz de cada cual."""
+        """Recita en italiano el texto, con la voz (el tono) de quien habla."""
         if not self.ok or not self.voices:
             return
-        key = (who, text[:48])
+        key = (who, text[:80])
         snd = self._said.get(key)
-        if snd is None:
-            f0 = VOICE_PITCH.get(who, 210 + (sum(map(ord, who)) % 5) * 12 if who else 160)
-            vowels = [c for c in text.lower().translate(_VOWEL) if c in "aeiou"][:18]
-            parts = []
-            for k, v in enumerate(vowels):
-                f = f0 * (1 + 0.07 * math.sin(k * 1.7)) * (0.94 if k == len(vowels) - 1 else 1)
-                parts.append(_voice(f, 0.09, v, 0.012))
-                parts.append(np.zeros(int(SR * 0.018)))
-            if not parts:
-                return
-            sig = np.concatenate(parts) * 0.5
-            snd = self._make(sig)
+        if snd is not None:
+            self._voice_play(snd)
+            return
+        self._voice_req = key
+
+        def work() -> None:
+            f0 = VOICE_PITCH.get(who, 200 + (sum(map(ord, who)) % 5) * 12 if who else 150)
+            s = self._make(synth_italian(text, f0) * 0.55)
             if len(self._said) > 64:
                 self._said.clear()
-            self._said[key] = snd
+            self._said[key] = s
+            if self._voice_req == key:  # si entretanto habló otro, este calla
+                self._voice_play(s)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _voice_play(self, snd: pygame.mixer.Sound) -> None:
         if self.vch:
             self.vch.stop()
         self.vch = snd.play()
@@ -4734,7 +5186,12 @@ CODEX = [
     ("La cúpula como paraguas", "Brunelleschi no protegió a nadie del fuego: usamos su doble casco como cobijo.", "licencia"),
     ("Gravedad hacia la luz", "En el Paraíso no hay suelo: la Compagnia cae hacia arriba. Es nuestra lectura de Par. I.", "tesis nuestra"),
     ("Las siete P", "El Ángel graba siete P en la frente de Dante; cada cornisa borra una (Purg. IX).", "dato"),
-    ("Las voces", "Sílabas formánticas sintéticas: suenan a italiano pero no dicen nada. Los subtítulos sí.", "licencia"),
+    ("Las voces", "Síntesis por formantes que pronuncia el italiano moderno de cada subtítulo, no el del Trecento.", "licencia"),
+    ("La barca de Flegias", "Flegias lleva a Dante y Virgilio por la Estigia hasta Dite (Inf. VIII).", "dato"),
+    ("Las tres fieras", "La lonza, el león y la loba cierran el camino; Virgilio propone «altro viaggio» (Inf. I).", "dato"),
+    ("El rodeo de Caronte", "No hay pasarela en el Aqueronte de Dante: es la alternativa del diseño al óbolo.", "licencia"),
+    ("DILIGITE IUSTITIAM", "Las almas de Júpiter escriben con luces «Diligite iustitiam qui iudicatis terram» (Par. XVIII).", "dato"),
+    ("Hipócritas", "Capas doradas por fuera y de plomo por dentro (Inf. XXIII).", "dato"),
 ]
 
 BRIGATA = {
@@ -4825,6 +5282,208 @@ MOD_TEXT = {
     "suicidi": "Bosque de los suicidas: cada excavación sangra (+1 de Peso).",
 }
 
+# Subtítulos: cada plantilla en español → (inglés, italiano moderno). La voz recita el italiano.
+TR: dict[str, tuple[str, str]] = {
+    "Primum Mobile: las palle rojas se disuelven en la luz. Solo queda el lirio.":
+        ("Primum Mobile: the red palle dissolve into light. Only the lily remains.",
+         "Primo Mobile: le palle rosse si sciolgono nella luce. Resta solo il giglio."),
+    "El Cocito cobra la traición: {n} alma(s) quedan presas en el hielo de la Antenora.":
+        ("Cocytus collects for treason: {n} soul(s) stay trapped in the ice of Antenora.",
+         "Il Cocito riscuote il tradimento: {n} anime restano prigioniere nel ghiaccio dell'Antenora."),
+    "Aviñón, 20 de octubre de 1349: la bula de Clemente VI condena a los flagelantes.":
+        ("Avignon, 20 October 1349: the bull of Clement VI condemns the flagellants.",
+         "Avignone, venti ottobre 1349: la bolla di Clemente sesto condanna i flagellanti."),
+    "Trepa por su pelo. Al otro lado del centro de la Tierra están las estrellas.":
+        ("Climb down his hair. Beyond the centre of the Earth are the stars.",
+         "Scendi per il suo pelo. Oltre il centro della Terra ci sono le stelle."),
+    "Aquí no se cae hacia abajo: se cae hacia la luz. Mira arriba.":
+        ("Here you do not fall down: you fall towards the light. Look up.",
+         "Qui non si cade in basso: si cade verso la luce. Guarda in alto."),
+    "El Ángel graba siete P en cada frente. Cada cornisa borrará una.":
+        ("The Angel carves seven P on every brow. Each terrace will erase one.",
+         "L'angelo incide sette P su ogni fronte. Ogni cornice ne cancellerà una."),
+    "Virgilio se ha ido. Llega Beatrice, velada, entre flores.":
+        ("Virgil is gone. Beatrice arrives, veiled, among flowers.",
+         "Virgilio se n'è andato. Arriva Beatrice, velata, tra i fiori."),
+    "Cada rama que se rompe aquí sangra. Excavar cuesta Peso.":
+        ("Every branch broken here bleeds. Digging costs Weight.",
+         "Ogni ramo spezzato qui sanguina. Scavare costa Peso."),
+    "Privilegio di Dioneo: quince segundos sin la regla de este lugar.":
+        ("Dioneo's privilege: fifteen seconds free of this place's rule.",
+         "Privilegio di Dioneo: quindici secondi senza la regola di questo luogo."),
+    "El Flagellante deja el látigo y sigue a los demás.":
+        ("The Flagellant lays down the whip and follows the others.",
+         "Il flagellante posa la frusta e segue gli altri."),
+    "«Perché mi schiante?» (Inf. XIII). El bosque sangra: +1 de Peso.":
+        ("«Perché mi schiante?» (Inf. XIII). The wood bleeds: +1 Weight.",
+         "«Perché mi schiante?» Il bosco sanguina: più uno di Peso."),
+    "La gracia no se compra. El Ángel no se mueve; tu Peso, sí.":
+        ("Grace cannot be bought. The Angel does not move; your Weight does.",
+         "La grazia non si compra. L'angelo non si muove; il tuo Peso sì."),
+    "La naranja amarga rueda. Las almas la siguen.":
+        ("The bitter orange rolls. The souls follow it.",
+         "L'arancia amara rotola. Le anime la seguono."),
+    "Cosme y Damián: {n} curados. Quince segundos de inmunidad.":
+        ("Cosmas and Damian: {n} healed. Fifteen seconds of immunity.",
+         "Cosma e Damiano: {n} guariti. Quindici secondi di immunità."),
+    "Brunelleschi: doble casco, sin cimbra. Bajo la cúpula no llueve fuego.":
+        ("Brunelleschi: double shell, no centring. Under the dome no fire falls.",
+         "Brunelleschi: doppia calotta, senza centina. Sotto la cupola non piove fuoco."),
+    "Brunelleschi: doble casco, sin cimbra. Un puente donde no lo había.":
+        ("Brunelleschi: double shell, no centring. A bridge where there was none.",
+         "Brunelleschi: doppia calotta, senza centina. Un ponte dove non c'era."),
+    "Botticelli dibuja la Mappa dell'Inferno: todo queda a la vista.":
+        ("Botticelli draws the Map of Hell: everything is laid bare.",
+         "Botticelli disegna la Mappa dell'Inferno: tutto è svelato."),
+    "Caravaggio pinta: un haz oblicuo elige a quien toca. Dejan de azotarse.":
+        ("Caravaggio paints: a slanting beam chooses whom it touches. They stop scourging themselves.",
+         "Caravaggio dipinge: un fascio obliquo sceglie chi tocca. Smettono di flagellarsi."),
+    "El escudo de Lorenzo cae girando hasta perderse. Ya no hay nada que llevar.":
+        ("Lorenzo's shield falls spinning until it is lost. There is nothing left to carry.",
+         "Lo stemma di Lorenzo cade girando fino a perdersi. Non c'è più niente da portare."),
+    "Dos almas cambian de lugar. Alguien, en algún sitio, lo cobrará.":
+        ("Two souls swap places. Someone, somewhere, will collect.",
+         "Due anime si scambiano di posto. Qualcuno, da qualche parte, presenterà il conto."),
+    "Adhaesit pavimento anima mea. Una palla menos, tres de Peso menos.":
+        ("Adhaesit pavimento anima mea. One palla less, three Weight less.",
+         "Adhaesit pavimento anima mea. Una palla in meno, tre di Peso in meno."),
+    "El óbolo cae en la mano del guardián. Pasad.":
+        ("The obol drops into the guardian's hand. Pass.",
+         "L'obolo cade nella mano del guardiano. Passate."),
+    "{name} se arroja sobre la naranja. El paso queda libre.":
+        ("{name} pounces on the orange. The way is clear.",
+         "{name} si getta sull'arancia. Il passo è libero."),
+    "26 de abril de 1478. {name} se vuelve contra los suyos. Dante lo anota.":
+        ("26 April 1478. {name} turns on its own. Dante takes note.",
+         "Ventisei aprile 1478. {name} si rivolta contro i suoi. Dante prende nota."),
+    "Catón ve el junco ceñido: «Va dunque, e fa che tu costui ricinghe / d'un giunco schietto» (Purg. I).":
+        ("Cato sees the girded reed: «Va dunque, e fa che tu costui ricinghe / d'un giunco schietto» (Purg. I).",
+         "Catone vede il giunco: «Va dunque, e fa che tu costui ricinghe d'un giunco schietto»."),
+    "Llega el messo del cielo: la puerta de Dite se abre con una varita.":
+        ("The heavenly messenger arrives: the gate of Dis opens at a touch of his wand.",
+         "Arriva il messo del cielo: la porta di Dite si apre con una verghetta."),
+    "{name}: «Pasad». La espera era la prueba.":
+        ("{name}: «Pass». The waiting was the test.",
+         "{name}: «Passate». L'attesa era la prova."),
+    "Il Maestro Lapo cierra la procesión, látigo en mano.":
+        ("Master Lapo closes the procession, whip in hand.",
+         "Il Maestro Lapo chiude la processione, frusta in mano."),
+    "El Maestro cruza la puerta. «Ya os lo dije: el látigo salva.»":
+        ("The Master crosses the gate. «I told you so: the whip saves.»",
+         "Il Maestro varca la porta. «Ve l'avevo detto: la frusta salva.»"),
+    "El Maestro ha llegado: el resto lo sigue con más ritmo.":
+        ("The Master has arrived: the rest follow him at a quicker pace.",
+         "Il Maestro è arrivato: gli altri lo seguono con passo più svelto."),
+    "Ha caído el Maestro. La Compagnia, sin pastor, corre en pánico.":
+        ("The Master has fallen. The Compagnia, shepherdless, runs in panic.",
+         "Il Maestro è caduto. La Compagnia, senza pastore, corre nel panico."),
+    "Filostrato suspira: los amantes no se separan.":
+        ("Filostrato sighs: lovers are not parted.",
+         "Filostrato sospira: gli amanti non si separano."),
+    "Filomena: «infortunio con final feliz». Un alma vuelve a la fila.":
+        ("Filomena: «misfortune with a happy ending». A soul rejoins the line.",
+         "Filomena: «sventura a lieto fine». Un'anima torna nella fila."),
+    "«Attienti ben, ché per cotali scale… conviensi dipartir da tanto male.» Ahora el suelo es el techo.":
+        ("«Attienti ben, ché per cotali scale… conviensi dipartir da tanto male.» Now the floor is the ceiling.",
+         "«Attienti ben, ché per cotali scale, conviensi dipartir da tanto male.» Ora il pavimento è il soffitto."),
+    "Quien cruza el fuego entero sale limpio. Quien se para, arde.":
+        ("Whoever crosses the whole fire comes out clean. Whoever stops, burns.",
+         "Chi attraversa tutto il fuoco ne esce puro. Chi si ferma, brucia."),
+    "Un niño huérfano de la peste se une a la fila. Se llama Michelangelo. (Licencia: Milán, 1577.)":
+        ("A child orphaned by the plague joins the line. His name is Michelangelo. (Licence: Milan, 1577.)",
+         "Un bambino orfano della peste si unisce alla fila. Si chiama Michelangelo."),
+    "Una de las llamas habla con la voz del Maestro. Dice que él solo dio consejo.":
+        ("One of the flames speaks with the Master's voice. It says it only gave advice.",
+         "Una delle fiamme parla con la voce del Maestro. Dice di aver dato solo un consiglio."),
+    "El estandarte se pierde en la niebla. Los ignavos se quedan sin nadie a quien seguir.":
+        ("The banner is lost in the fog. The neutrals are left with no one to follow.",
+         "L'insegna si perde nella nebbia. Gli ignavi restano senza nessuno da seguire."),
+    "Neifile: «con ingenio». Un {skill} más escondido en el camino.":
+        ("Neifile: «by wit». One more {skill} hidden along the way.",
+         "Neifile: «con ingegno». Un {skill} in più nascosto sul cammino."),
+    "Una pagina salvada de las llamas.":
+        ("A page saved from the flames.", "Una pagina salvata dalle fiamme."),
+    "Era falsa. Lauretta se ríe: «burla en general».":
+        ("It was fake. Lauretta laughs: «tricks in general».", "Era falsa. Lauretta ride: «beffe in generale»."),
+    "El escudo está lleno: la {palla} cede su hueco.":
+        ("The shield is full: the {palla} gives up its place.", "Lo stemma è pieno: la {palla} cede il suo posto."),
+    "«Palle, palle, palle!» La Compagnia corre al doble.":
+        ("«Palle, palle, palle!» The Compagnia runs at double speed.", "«Palle, palle, palle!» La Compagnia corre al doppio."),
+    "Con Peso no se asciende: cada alma que llega quema un punto ({n} restantes).":
+        ("No one ascends with Weight: each soul that arrives burns one point ({n} left).",
+         "Con il Peso non si sale: ogni anima che arriva ne brucia un punto, ne restano {n}."),
+    "Un bezante compra un segundo intento de la cornisa: más días, +2 de Peso.":
+        ("A bezant buys a second attempt at the terrace: more days, +2 Weight.",
+         "Un bisante compra un secondo tentativo della cornice: più giorni, più due di Peso."),
+    "Un ladrón se vuelve serpiente (Inf. XXV).":
+        ("A thief turns into a serpent (Inf. XXV).", "Un ladro diventa serpente."),
+    "La lonza": ("The leopard", "La lonza"),
+    "«...una lupa, che di tutte brame / sembiava carca». Distráela.":
+        ("«...una lupa, che di tutte brame / sembiava carca». Distract her.",
+         "«Una lupa, che di tutte brame sembiava carca». Distraila."),
+    "«…una lonza leggera e presta molto». Por aquí no se pasa.":
+        ("«…una lonza leggera e presta molto». No way through here.",
+         "«Una lonza leggera e presta molto». Di qui non si passa."),
+    "«…con la test'alta e con rabbiosa fame». Tampoco por aquí: «a te convien tenere altro viaggio».":
+        ("«…con la test'alta e con rabbiosa fame». Not here either: «a te convien tenere altro viaggio».",
+         "«Con la test'alta e con rabbiosa fame». Nemmeno di qui: «a te convien tenere altro viaggio»."),
+    "«Caron dimonio, con occhi di bragia». Paga el óbolo.":
+        ("«Caron dimonio, con occhi di bragia». Pay the obol.", "«Caron dimonio, con occhi di bragia». Paga l'obolo."),
+    "Minos juzga y ciñe la cola. Se deja convencer.":
+        ("Minos judges and wraps his tail. He can be persuaded.", "Minosse giudica e cinge la coda. Si lascia convincere."),
+    "Tres bocas. Virgilio le echó tierra; tú, una naranja.":
+        ("Three mouths. Virgil threw earth; you, an orange.", "Tre bocche. Virgilio gli gettò la terra; tu, un'arancia."),
+    "«Pape Satàn, pape Satàn aleppe!» Habla en monedas.":
+        ("«Pape Satàn, pape Satàn aleppe!» He speaks in coins.", "«Pape Satàn, pape Satàn aleppe!» Parla in monete."),
+    "El barquero de la Estigia cobra el pasaje.":
+        ("The ferryman of the Styx charges the fare.", "Il nocchiero dello Stige si fa pagare il passaggio."),
+    "Las Furias cierran Dite. Solo un mensajero del cielo abre.":
+        ("The Furies bar Dis. Only a messenger from heaven opens it.", "Le Furie chiudono Dite. Solo un messo del cielo apre."),
+    "Quirón y sus arqueros. Un señuelo los aparta.":
+        ("Chiron and his archers. A lure draws them away.", "Chirone e i suoi arcieri. Un'esca li allontana."),
+    "Las harpías anidan en el bosque de los suicidas.":
+        ("The Harpies nest in the wood of the suicides.", "Le Arpie fanno il nido nel bosco dei suicidi."),
+    "Catón exige el junco: humildad antes de subir.":
+        ("Cato demands the reed: humility before climbing.", "Catone esige il giunco: umiltà prima di salire."),
+    "Los excomulgados esperan. Esperar también es trabajo.":
+        ("The excommunicated wait. Waiting is work too.", "Gli scomunicati aspettano. Anche aspettare è lavoro."),
+    "El ángel abre a quien espera. La gracia no se compra.":
+        ("The angel opens to those who wait. Grace cannot be bought.", "L'angelo apre a chi aspetta. La grazia non si compra."),
+    "Examen de fe. Espera la pregunta.": ("Examination on faith. Await the question.", "Esame di fede. Attendi la domanda."),
+    "Examen de esperanza.": ("Examination on hope.", "Esame di speranza."),
+    "Examen de caridad.": ("Examination on charity.", "Esame di carità."),
+    "Anteo, sin cadenas: «mettine giù». Llega a su mano y te baja al fondo.":
+        ("Antaeus, unchained: «mettine giù». Reach his hand and he lowers you to the bottom.",
+         "Anteo, senza catene: «mettine giù». Raggiungi la sua mano e ti porta sul fondo."),
+    "¡Arrojad al fuego los espejos, los naipes, los afeites!":
+        ("Throw the mirrors, the cards, the cosmetics into the fire!", "Gettate nel fuoco gli specchi, le carte, i belletti!"),
+    "Florencia, haz penitencia mientras aún arde la hoguera.":
+        ("Florence, do penance while the pyre still burns.", "Firenze, fa' penitenza finché il rogo arde ancora."),
+    "Los libros vanos, al fuego; las almas, al cielo.":
+        ("Vain books to the fire; souls to heaven.", "I libri vani al fuoco; le anime al cielo."),
+    "No es la llama la que quema: es la vanidad que lleváis encima.":
+        ("It is not the flame that burns: it is the vanity you carry.", "Non è la fiamma che brucia: è la vanità che portate addosso."),
+    "«Quelli è Omero poeta sovrano» (Inf. IV, 88).": ("«Quelli è Omero poeta sovrano» (Inf. IV, 88).", "«Quelli è Omero poeta sovrano»."),
+    "«…il maestro di color che sanno» (Inf. IV, 131).": ("«…il maestro di color che sanno» (Inf. IV, 131).", "«Il maestro di color che sanno»."),
+    "«Averoìs, che 'l gran comento feo» (Inf. IV, 144).": ("«Averoìs, che 'l gran comento feo» (Inf. IV, 144).", "«Averoìs, che 'l gran comento feo»."),
+    "Dies irae, dies illa…": ("Dies irae, dies illa…", "Dies irae, dies illa."),
+    "«Libero, dritto e sano è tuo arbitrio… per ch'io te sovra te corono e mitrio.» (Purg. XXVII)":
+        ("«Libero, dritto e sano è tuo arbitrio… per ch'io te sovra te corono e mitrio.» (Purg. XXVII)",
+         "«Libero, dritto e sano è tuo arbitrio, per ch'io te sovra te corono e mitrio.»"),
+}
+LANGS = ("es", "en", "it")
+LANG_NAMES = {"es": "español", "en": "English", "it": "italiano"}
+
+
+def tr(text: str, lang: str, **kw) -> str:
+    """Traduce una plantilla de mensaje al idioma de los subtítulos (o de la voz)."""
+    if lang != "es" and text in TR:
+        text = TR[text][LANGS.index(lang) - 1]
+    try:
+        return text.format(**kw)
+    except (KeyError, IndexError, ValueError):
+        return text
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 9. INTERFAZ — predela, escudo, mapa de la Commedia, villa, finales
@@ -4871,7 +5530,7 @@ class Save:
     @property
     def opts(self) -> dict:
         o = self.data.setdefault("opts", {})
-        for k, v in {"music": True, "voices": True, "quality": 2, "volume": 8, "fullscreen": False}.items():
+        for k, v in {"music": True, "voices": True, "quality": 2, "volume": 8, "fullscreen": False, "lang": "es"}.items():
             o.setdefault(k, v)
         return o
 
@@ -4946,6 +5605,7 @@ class PlayState:
     aborted: bool = False
     armed: int | None = None
     swap_a: int | None = None
+    artist: str | None = None
     smooth_cam: float = 0.0
 
 
@@ -5018,6 +5678,7 @@ class App:
         self.sfx.voices = o["voices"]
         self.sfx.set_volume(o["volume"] / 10)
         self.quality = 0 if args.lowfx else int(o["quality"])
+        self.lang = o["lang"] if o["lang"] in LANGS else "es"
         self.opt_sel = 0
         # mando: cursor virtual y ejes
         self.pads: list = []
@@ -5192,9 +5853,12 @@ class App:
         ok = w.success and not p.aborted
         verse = None
         ending = None
-        if ok and not p.demo:
+        if ok and not p.demo and p.idx < N_LEVELS:
             camp = camp_after(w)
             self.save.record(p.idx, w, camp)
+            if p.idx == 67:
+                pct = self.save.pct() or 0
+                w.notes.append(f"Eunoè, la memoria del bien: has salvado al {pct:.0f} % de las almas de la Commedia")
             self.unlocked = max(self.unlocked, min(N_LEVELS - 1, p.idx + 1))
             if w.pagina:
                 verse = verse_of(p.idx)
@@ -5295,7 +5959,7 @@ class App:
         return None
 
     # ── opciones ─────────────────────────────────────────────────────────
-    OPTS = ["music", "voices", "quality", "volume", "fullscreen", "back"]
+    OPTS = ["music", "voices", "lang", "quality", "volume", "fullscreen", "back"]
 
     def on_options(self, ev):
         if ev.type != pygame.KEYDOWN and not (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1):
@@ -5303,7 +5967,7 @@ class App:
         o = self.save.opts
         key = getattr(ev, "key", pygame.K_RETURN)
         if ev.type == pygame.MOUSEBUTTONDOWN:
-            k = int((ev.pos[1] / self.s - 120) // 22)
+            k = int((ev.pos[1] / self.s - 110) // 22)
             if 0 <= k < len(self.OPTS):
                 self.opt_sel = k
         if key == pygame.K_ESCAPE:
@@ -5326,6 +5990,9 @@ class App:
             case "voices":
                 o["voices"] = self.sfx.voices = not o["voices"]
                 self.sfx.speak("Virgilio", "Or va, ch'un sol volere è d'ambedue")
+            case "lang":
+                self.lang = LANGS[(LANGS.index(self.lang) + delta) % len(LANGS)]
+                o["lang"] = self.lang
             case "quality":
                 o["quality"] = self.quality = 0 if self.quality else 2
             case "volume":
@@ -5350,14 +6017,15 @@ class App:
         self.text("OPCIONES", self.f_title, (LW / 2, 60), GOLD, center=True)
         vals = {
             "music": ("Música", "sí" if o["music"] else "no"),
-            "voices": ("Voces", "sí" if o["voices"] else "no"),
+            "voices": ("Voces (recitado en italiano)", "sí" if o["voices"] else "no"),
+            "lang": ("Subtítulos", LANG_NAMES[self.lang]),
             "quality": ("Luz y bloom", "alta" if self.quality else "baja"),
             "volume": ("Volumen", "▮" * o["volume"] + "▯" * (10 - o["volume"])),
             "fullscreen": ("Pantalla completa", "sí" if self.fullscreen else "no"),
             "back": ("Volver", ""),
         }
         for k, item in enumerate(self.OPTS):
-            y = 120 + k * 22
+            y = 110 + k * 22
             sel = k == self.opt_sel
             name, val = vals[item]
             if sel:
@@ -5686,8 +6354,8 @@ class App:
         w = p.world
         if w.msg_serial != p.msg_seen and w.messages:
             p.msg_seen = w.msg_serial
-            text, _, who = w.messages[-1]
-            self.sfx.speak(who, text)
+            text, _, who, kw = w.messages[-1]
+            self.sfx.speak(who, tr(text, "it", **kw))
 
     def world_mouse(self) -> tuple[int, int, bool]:
         assert self.p is not None
@@ -5723,6 +6391,11 @@ class App:
                 p.nuke_hold = 1
             elif k == pygame.K_d and not p.demo:
                 self.apply(("dioneo",))
+            elif k == pygame.K_c and not p.demo and "cambio" in w.shield:
+                self.apply(("tempo", w.shield.index("cambio")))
+            elif k == pygame.K_TAB and p.armed is not None and p.armed < len(w.shield) and w.shield[p.armed] == "mecenate":
+                p.artist = ARTISTS[(ARTISTS.index(p.artist or w.next_artist()) + 1) % 3]
+                self.sfx.play("click")
             elif k == pygame.K_RETURN and w.compagnia_done and w.maestro_out:
                 w.maestro_wait = 10**9
             elif pygame.K_1 <= k <= pygame.K_8:
@@ -5811,7 +6484,12 @@ class App:
             if self.apply(("swap", slot, p.swap_a, L.id)):
                 p.armed = p.swap_a = None
             return
-        if self.apply(("palla", slot, x, y)):
+        if kind == "mecenate":
+            ok = self.apply(("mecenate", slot, x, y, p.artist or w.next_artist()))
+            p.artist = None
+        else:
+            ok = self.apply(("palla", slot, x, y))
+        if ok:
             p.armed = None
         else:
             self.sfx.play("ting")
@@ -5973,11 +6651,12 @@ class App:
         if flags:
             self.text("   ".join(flags), self.f_small, (LW / 2, 4), UI_ACC, center=True)
         if p.paused:
-            self.panel(150, 100, 340, 96, 210)
+            self.panel(140, 100, 360, 110, 210)
             rows = ["1–8 / rueda: oficio · clic: asignar · ←→ / bordes / minimapa: cámara",
                     "Q W E R T Y U I: armar palla · clic: usarla · clic derecho: lanzar naranja",
                     "Mayús + tecla: devolver palla (avaros) · D: Privilegio di Dioneo",
                     "+ / −: cadenza · F: avance ×4 · Supr 2 s (o N dos veces): Dies Irae",
+                    "C: un bezante compra más días (Purgatorio) · Tab: artista del Mecenate",
                     "Espacio: seguir · Esc: abandonar · M: música · F11: pantalla completa"]
             self.text("PAUSA", self.f_big, (LW / 2, 106), GOLD, center=True)
             for k, row in enumerate(rows):
@@ -5985,9 +6664,10 @@ class App:
         self.draw_shield(w, p.armed)
         # mensajes (Virgilio, guardianes, Brigata…)
         y = VIEW_H - 14
-        for text, ttl, who in reversed(w.messages[-3:]):
+        for text, ttl, who, kw in reversed(w.messages[-3:]):
             a = min(255, ttl * 8)
-            line = f"{who}: {text}" if who else text
+            text = tr(text, self.lang, **kw)
+            line = f"{who}: {text}" if who and not text.startswith(who) else text
             for k, ln in enumerate(reversed(self.wrap(line, self.f_it, 520))):
                 self.text(ln, self.f_it, (LW / 2, y - k * 11), (250, 236, 210), center=True, alpha=a)
             y -= 11 * len(self.wrap(line, self.f_it, 520)) + 2
@@ -6013,6 +6693,9 @@ class App:
             msg = PALLE_INFO[kind][1]
             if kind == "congiura" and p.swap_a is not None:
                 msg = "Elige la segunda alma."
+            if kind == "mecenate":
+                art = p.artist or w.next_artist()
+                msg = f"Artista: {art.capitalize()} (Tab cambia: Brunelleschi · Botticelli · Caravaggio)"
             self.text(f"{PALLE_INFO[kind][0]}: {msg}  (clic para usar · Esc cancela)", self.f_small, (LW / 2, 18), UI_ACC, center=True)
 
     @lru_cache(maxsize=1)
@@ -6083,6 +6766,9 @@ class App:
         for i, sk in enumerate(SKILLS):
             x = SKILL_X0 + i * SKILL_W
             sel = sk == p.skill
+            if sk == Skill.FLAGELLANTE and w.level.id >= 99:  # en el último cielo ya no hay látigo
+                pygame.draw.rect(self.screen, (18, 12, 10), self.R(x + 1, top + 5, SKILL_W - 2, PANEL_H - 9))
+                continue
             r = self.R(x + 1, top + 5, SKILL_W - 2, PANEL_H - 9)
             pygame.draw.rect(self.screen, (70, 26, 22) if sel else (30, 20, 26), r)
             # arco apuntado
@@ -6140,7 +6826,7 @@ class App:
             return None
         key = getattr(ev, "key", pygame.K_RETURN)
         if key == pygame.K_ESCAPE:
-            self.sel = min(self.unlocked, r["idx"] + (1 if r["ok"] else 0))
+            self.sel = min(self.unlocked, r["idx"] + (1 if r["ok"] else 0), N_LEVELS - 1)
             self.mode = "map"
         elif key == pygame.K_s and not r["demo"]:
             path = Path.cwd() / f"pydanteshell_nivel{r['idx']:03d}.json"
@@ -6157,7 +6843,7 @@ class App:
                 self.mode = "ending"
                 return None
             nxt = r["idx"] + 1 if r["ok"] and not r["demo"] else r["idx"]
-            if nxt >= N_LEVELS:
+            if nxt >= N_LEVELS and r["idx"] < N_LEVELS or r["idx"] >= N_LEVELS and r["ok"]:
                 self.mode = "map"
             else:
                 self.sel = nxt
@@ -6674,6 +7360,21 @@ def selftest(quick: bool = False) -> int:
     w.skills[Skill.PIAGNONE] = 0
     check("en el Paraíso al Flagellante se le convence de seguir", w.assign(blk.id, Skill.PIAGNONE) and blk.state == St.WALK)
 
+    print("Subtítulos y formato de nivel:")
+    lines = [g[3] for g in GUARDS.values()] + SAVONAROLA + [s[1] for s in SABIOS]
+    missing = [t for t in lines if t not in TR]
+    check("todas las voces tienen subtítulo en inglés e italiano", not missing, str(missing[:2]))
+    check("el italiano se lee como se escribe", it_phonemes("gli occhi sciagurati") == ["L", "i", "|", "o", "k:", "i", "|", "S", "a", "g", "u", "r", "a", "t", "i"],
+          str(it_phonemes("gli occhi sciagurati")))
+    lv = get_level(33)
+    back = level_from_json(json.loads(json.dumps(level_to_json(lv))), 1001)
+    CUSTOM[1001] = back
+    w1, _ = simulate(33, Autopilot(lv.solution))
+    w2, _ = simulate(1001, Autopilot(back.solution))
+    CUSTOM.pop(1001)
+    check("un nivel exportado a JSON y vuelto a leer se juega igual", (w1.saved, w1.tick_count) == (w2.saved, w2.tick_count),
+          f"{w1.saved}/{w1.tick_count} vs {w2.saved}/{w2.tick_count}")
+
     print("La Commedia (solución de referencia en cada nivel):")
     idxs = range(N_LEVELS) if not quick else range(0, N_LEVELS, 10)
     for i in idxs:
@@ -6711,6 +7412,91 @@ def calibrate() -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Formato de nivel (§20 del diseño): exportar e importar JSON
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def level_to_json(lv: Level) -> dict:
+    _, _, ents, exs = parse_map(lv.map)
+    rule = lambda r: {k: (str(v) if isinstance(v, StrEnum) else list(v) if isinstance(v, tuple) else v)  # noqa: E731
+                      for k, v in ((f, getattr(r, f)) for f in Rule.__slots__) if v != getattr(Rule(None), k)}
+    return {
+        "id": lv.id, "name": lv.name, "place": lv.place, "cantica": lv.cantica, "canto": lv.canto,
+        "giornata": lv.giornata + 1, "difficulty": lv.difficulty.lower(), "seed": 1348 + lv.id, "theme": lv.theme,
+        "physics": {"gravity": "up" if "lux" in lv.mods else "flip" if lv.special == "lucifero" else "down"},
+        "map": list(lv.map),
+        "entrance": [{"x": e.x, "y": e.y, "dir": e.dir, "inv": e.inv} for e in ents],
+        "count": lv.total, "release_rate": lv.rr, "exits": [{"x": e.x, "y": e.y, "inv": e.inv} for e in exs],
+        "save_required": lv.to_save, "save_required_pct": round(100 * lv.to_save / max(1, lv.total)),
+        "time_days": DAYS, "minutes": lv.minutes,
+        "skills": {s.value: n for s, n in lv.skills.items()},
+        "palle": [{"type": p.kind, "x": p.x, "y": p.y, "artist": p.artist, "need": p.need, "inv": p.inv} for p in lv.pickups],
+        "guards": [{"type": g.kind, "x": g.x, "y": g.y, "inv": g.inv} for g in lv.guards],
+        "hazards": {"vents": [list(v) for v in lv.vents], "boulders": [list(b) for b in lv.boulders],
+                    "boats": [list(b) for b in lv.boats], "rising_fire": list(lv.fire) if lv.fire else None,
+                    "phantoms": [list(p) for p in lv.phantoms]},
+        "mods": sorted(lv.mods), "special": lv.special, "sky": lv.sky,
+        "moria": {"initial_infected": lv.moria[0], "rats": lv.moria[1]},
+        "hint": lv.hint, "sermon": lv.sermon, "guide": lv.guide,
+        "reference_solution": [rule(r) for r in lv.solution],
+    }
+
+
+def level_from_json(d: dict, lid: int = 1000) -> Level:
+    """Lee un nivel en el formato del diseño. Solo «map» es obligatorio."""
+    rows = tuple(d["map"])
+    if len({len(r) for r in rows}) != 1:
+        raise ValueError("todas las filas del mapa deben medir lo mismo")
+    rows = tuple("." * len(rows[0]) for _ in range(max(0, ROWS - len(rows)))) + rows[:ROWS]
+    cantica = d.get("cantica", "inferno")
+    if cantica not in CANTICHE:
+        cantica = "inferno"
+    total = int(d.get("count", 20))
+    skills = {s: int(d.get("skills", {}).get(s.value, 0)) for s in SKILLS}
+
+    def rule(r: dict) -> Rule:
+        kw = {"skill": None, **r}
+        if kw.get("skill"):
+            kw["skill"] = Skill(kw["skill"])
+        if kw.get("state"):
+            kw["state"] = St(kw["state"])
+        if "y" in kw:
+            kw["y"] = tuple(kw["y"])
+        return Rule(**{k: v for k, v in kw.items() if k in Rule.__slots__})
+
+    hz = d.get("hazards", {}) or {}
+    fire = hz.get("rising_fire")
+    gi = max(0, min(9, int(d.get("giornata", 1)) - 1))
+    theme = d.get("theme", {"inferno": "inferno", "purgatorio": "monte", "paradiso": "paradiso"}.get(cantica, "inferno"))
+    return Level(
+        id=lid, name=d.get("name", "Nivel propio"), place=d.get("place", d.get("name", "Nivel propio")),
+        canto=d.get("canto", ""), cantica=cantica, giornata=gi, difficulty=str(d.get("difficulty", "pellegrino")).capitalize(),
+        total=total, to_save=int(d.get("save_required", math.ceil(total * d.get("save_required_pct", 50) / 100))),
+        rr=int(d.get("release_rate", 50)), minutes=int(d.get("minutes", max(1, round(d.get("time_days", DAYS) / DAYS * 5)))),
+        skills=skills, theme=theme if theme in THEMES else "inferno", map=rows,
+        solution=tuple(rule(r) for r in d.get("reference_solution", [])),
+        pickups=tuple(PickSpec(p["type"], int(p["x"]), int(p["y"]), p.get("artist", ""), bool(p.get("need")), bool(p.get("inv")))
+                      for p in d.get("palle", [])),
+        guards=tuple(GuardSpec(g["type"], int(g["x"]), int(g["y"]), bool(g.get("inv"))) for g in d.get("guards", [])),
+        vents=tuple(tuple(v) for v in hz.get("vents", [])), boulders=tuple(tuple(b) for b in hz.get("boulders", [])),
+        boats=tuple(tuple(b) for b in hz.get("boats", [])), fire=tuple(fire) if fire else None,
+        phantoms=tuple(tuple(p) for p in hz.get("phantoms", [])),
+        mods=frozenset(d.get("mods", [])), special=d.get("special", ""), sky=d.get("sky", ""),
+        moria=(int(d.get("moria", {}).get("initial_infected", 0)), bool(d.get("moria", {}).get("rats", False))),
+        hint=d.get("hint", ""), sermon=d.get("sermon", SERMONS[0]), guide=d.get("guide", "Virgilio"),
+    )
+
+
+def export_levels(folder: str) -> int:
+    out = Path(folder)
+    out.mkdir(parents=True, exist_ok=True)
+    for i in range(N_LEVELS):
+        (out / f"{i:03d}.json").write_text(json.dumps(level_to_json(get_level(i)), ensure_ascii=False, indent=1))
+    print(f"{N_LEVELS} niveles exportados a {out}/")
+    return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 11. BUCLE PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -6728,11 +7514,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mute", action="store_true", help="sin sonido")
     ap.add_argument("--lowfx", action="store_true", help="sin bloom ni grano (equipos modestos)")
     ap.add_argument("--all", action="store_true", help="desbloquear toda la Commedia")
+    ap.add_argument("--export-levels", metavar="CARPETA", help="escribir los 101 niveles en JSON (formato del diseño)")
+    ap.add_argument("--custom", metavar="NIVEL.json", help="jugar un nivel propio en JSON")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest(args.quick)
     if args.calibrate:
         return calibrate()
+    if args.export_levels:
+        return export_levels(args.export_levels)
+    if args.custom:
+        CUSTOM[1000] = level_from_json(json.loads(Path(args.custom).read_text()))
+        args.level = None
+        app = App(args)
+        app.open_preview(1000)
+        app.run()
+        pygame.quit()
+        return 0
     App(args).run()
     pygame.quit()
     return 0

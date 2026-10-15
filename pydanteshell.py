@@ -1740,8 +1740,9 @@ Command = tuple
 class World:
     """Simulación determinista. No sabe que pygame existe."""
 
-    def __init__(self, level: Level, camp: Campaign | None = None, seed: int = 1348):
+    def __init__(self, level: Level, camp: Campaign | None = None, seed: int = 1348, infinite: bool = False):
         self.level = level
+        self.infinite = infinite  # oficios sin límite (opción del jugador)
         camp = camp or Campaign()
         self.camp_in = camp
         kinds, hazard, self.entrances, self.exits = parse_map(level.map)
@@ -1964,6 +1965,20 @@ class World:
     def success(self) -> bool:
         return self.saved >= self.level.to_save
 
+    def allowed(self, skill: Skill) -> bool:
+        """Oficios que existen aquí: en el Paraíso no hay Bubbone ni Becchino, y en el último cielo
+        ni Flagellante; la acedia no deja pararse."""
+        if self.cantica == "paradiso" and skill in (Skill.BUBBONE, Skill.BECCHINO):
+            return False
+        if skill == Skill.FLAGELLANTE and (self.level.id >= 99 and self.cantica == "paradiso" or "fast" in self.mods):
+            return False
+        return True
+
+    def has_skill(self, skill: Skill) -> bool:
+        if self.infinite:
+            return self.allowed(skill)
+        return self.skills[skill] > 0
+
     def can_assign(self, L: Lemming, skill: Skill) -> bool:
         if L.removed or L.state in DOOMED or L.maestro:
             return False
@@ -2057,9 +2072,10 @@ class World:
             self.say("El Flagellante deja el látigo y sigue a los demás.", "Beatrice")
             self.events.append("cure")
             return True
-        if L is None or self.skills[skill] <= 0 or not self.can_assign(L, skill):
+        if L is None or not self.has_skill(skill) or not self.can_assign(L, skill):
             return False
-        self.skills[skill] -= 1
+        if not self.infinite:
+            self.skills[skill] -= 1
         L.fervor = 0
         L.stare = 0
         if "suicidi" in self.mods and skill in (Skill.PIAGNONE, Skill.MINATORE, Skill.BECCHINO, Skill.BUBBONE):
@@ -3232,7 +3248,7 @@ class Autopilot:
             if r.palla in world.shield and apply(("palla", world.shield.index(r.palla), g.x, g.y - 10)):
                 self._done(i, world)
             return
-        if r.skill is None or world.skills[r.skill] <= 0:
+        if r.skill is None or not world.has_skill(r.skill):
             return
         for L in world.lemmings:
             if self.left[i] <= 0:
@@ -5530,7 +5546,8 @@ class Save:
     @property
     def opts(self) -> dict:
         o = self.data.setdefault("opts", {})
-        for k, v in {"music": True, "voices": True, "quality": 2, "volume": 8, "fullscreen": False, "lang": "es"}.items():
+        for k, v in {"music": True, "voices": True, "quality": 2, "volume": 8, "fullscreen": False, "lang": "es",
+                     "infinite": True}.items():
             o.setdefault(k, v)
         return o
 
@@ -5679,6 +5696,8 @@ class App:
         self.sfx.set_volume(o["volume"] / 10)
         self.quality = 0 if args.lowfx else int(o["quality"])
         self.lang = o["lang"] if o["lang"] in LANGS else "es"
+        self.infinite = bool(o["infinite"]) and not getattr(args, "limited", False)
+        self.replay_infinite = False
         self.opt_sel = 0
         # mando: cursor virtual y ejes
         self.pads: list = []
@@ -5710,6 +5729,7 @@ class App:
         self.args = args
         if args.replay:
             data = json.loads(Path(args.replay).read_text())
+            self.replay_infinite = bool(data.get("infinite", False))
             self.start_play(int(data["level"]), pilot=Replay(data["commands"]), demo=True)
         elif args.demo is not None:
             self.start_play(args.demo, pilot=Autopilot(get_level(args.demo).solution), demo=True)
@@ -5825,7 +5845,7 @@ class App:
 
     def open_preview(self, idx: int) -> None:
         camp = self.save.camp_for(idx)
-        w = World(get_level(idx), camp)
+        w = World(get_level(idx), camp, infinite=self.infinite)
         self.preview = (idx, w, Renderer(w, self.sprites, self.quality))
         self.mode = "preview"
         self.sfx.music(get_level(idx).cantica if get_level(idx).cantica != "proemio" else "firenze")
@@ -5835,7 +5855,7 @@ class App:
         if self.preview and self.preview[0] == idx and pilot is None:
             _, w, r = self.preview
         else:
-            w = World(get_level(idx), camp)
+            w = World(get_level(idx), camp, infinite=self.infinite if not demo else self.replay_infinite)
             r = Renderer(w, self.sprites, self.quality)
         self.preview = None
         cam = w.entrances[0].x - VIEW_W // 2 if w.entrances else 0
@@ -5959,7 +5979,7 @@ class App:
         return None
 
     # ── opciones ─────────────────────────────────────────────────────────
-    OPTS = ["music", "voices", "lang", "quality", "volume", "fullscreen", "back"]
+    OPTS = ["infinite", "music", "voices", "lang", "quality", "volume", "fullscreen", "back"]
 
     def on_options(self, ev):
         if ev.type != pygame.KEYDOWN and not (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1):
@@ -5967,7 +5987,7 @@ class App:
         o = self.save.opts
         key = getattr(ev, "key", pygame.K_RETURN)
         if ev.type == pygame.MOUSEBUTTONDOWN:
-            k = int((ev.pos[1] / self.s - 110) // 22)
+            k = int((ev.pos[1] / self.s - 100) // 22)
             if 0 <= k < len(self.OPTS):
                 self.opt_sel = k
         if key == pygame.K_ESCAPE:
@@ -5990,6 +6010,8 @@ class App:
             case "voices":
                 o["voices"] = self.sfx.voices = not o["voices"]
                 self.sfx.speak("Virgilio", "Or va, ch'un sol volere è d'ambedue")
+            case "infinite":
+                o["infinite"] = self.infinite = not self.infinite
             case "lang":
                 self.lang = LANGS[(LANGS.index(self.lang) + delta) % len(LANGS)]
                 o["lang"] = self.lang
@@ -6016,6 +6038,7 @@ class App:
         o = self.save.opts
         self.text("OPCIONES", self.f_title, (LW / 2, 60), GOLD, center=True)
         vals = {
+            "infinite": ("Oficios", "infinitos" if self.infinite else "limitados (diseño)"),
             "music": ("Música", "sí" if o["music"] else "no"),
             "voices": ("Voces (recitado en italiano)", "sí" if o["voices"] else "no"),
             "lang": ("Subtítulos", LANG_NAMES[self.lang]),
@@ -6025,7 +6048,7 @@ class App:
             "back": ("Volver", ""),
         }
         for k, item in enumerate(self.OPTS):
-            y = 110 + k * 22
+            y = 100 + k * 22
             sel = k == self.opt_sel
             name, val = vals[item]
             if sel:
@@ -6320,7 +6343,7 @@ class App:
         self.text(f"{lv.total} disciplinati · salvar {lv.to_save} ({pct} %) · {days} ({lv.minutes} min) · cadenza {lv.rr} · {lv.difficulty}",
                   self.f_med, (LW / 2, y), UI_ACC, center=True)
         y += 16
-        skills = [f"{SKILL_NAMES[k]} {w.skills[k]}" for k in SKILLS if w.skills[k]]
+        skills = [f"{SKILL_NAMES[k]} {'∞' if w.infinite else w.skills[k]}" for k in SKILLS if w.has_skill(k)]
         y = self.para("  ·  ".join(skills), self.f_small, 44, y, 552, UI_OK, center=True) + 4
         gm = GIORNATE[lv.giornata]
         self.text(f"Giornata {roman(lv.giornata + 1)} — {gm[0]}: {gm[3]}", self.f_small, (LW / 2, y), (200, 200, 240), center=True)
@@ -6778,10 +6801,11 @@ class App:
             pygame.draw.lines(self.screen, GOLD if sel else GOLD_D, False, [(r.left, r.bottom), arc[0], arc[1], arc[2], (r.right, r.bottom)],
                               max(1, s // 2) + (1 if sel else 0))
             pygame.draw.line(self.screen, GOLD_D, (r.left, r.bottom), (r.right, r.bottom), max(1, s // 2))
-            n = w.skills[sk]
+            n = w.has_skill(sk)
+            label = "∞" if w.infinite and n else str(w.skills[sk]) if n else "–"
             col = (240, 232, 214) if n else (90, 80, 76)
             draw_skill_icon(self.screen, sk, int((x + SKILL_W / 2) * s), int((top + 33) * s), s * 0.95, col)
-            self.text(str(n) if n else "–", self.f_small, (x + SKILL_W / 2, top + 13), UI_ACC if n else UI_DIM, center=True)
+            self.text(label, self.f_small if label != "∞" else self.f_med, (x + SKILL_W / 2, top + 12), UI_ACC if n else UI_DIM, center=True)
             self.text(f"{i + 1}", self.f_tiny, (x + 4, top + PANEL_H - 12), UI_DIM, shadow=False)
             if sel:
                 self.text(SKILL_NAMES[sk], self.f_tiny, (x + SKILL_W / 2, top + PANEL_H - 12), UI_ACC, center=True)
@@ -6831,7 +6855,7 @@ class App:
         elif key == pygame.K_s and not r["demo"]:
             path = Path.cwd() / f"pydanteshell_nivel{r['idx']:03d}.json"
             try:
-                path.write_text(json.dumps({"level": r["idx"], "commands": r["log"]}))
+                path.write_text(json.dumps({"level": r["idx"], "commands": r["log"], "infinite": self.infinite}))
                 r["saved_file"] = path.name
             except OSError as exc:
                 r["saved_file"] = f"error: {exc}"
@@ -7360,6 +7384,13 @@ def selftest(quick: bool = False) -> int:
     w.skills[Skill.PIAGNONE] = 0
     check("en el Paraíso al Flagellante se le convence de seguir", w.assign(blk.id, Skill.PIAGNONE) and blk.state == St.WALK)
 
+    w = _lab()
+    w.infinite = True
+    w.skills = {s: 0 for s in SKILLS}
+    a, b = _put(w, 40, 120), _put(w, 80, 120)
+    check("con oficios infinitos no se gastan", w.assign(a.id, Skill.CAPOMASTRO) and w.assign(b.id, Skill.CAPOMASTRO)
+          and w.skills[Skill.CAPOMASTRO] == 0)
+
     print("Subtítulos y formato de nivel:")
     lines = [g[3] for g in GUARDS.values()] + SAVONAROLA + [s[1] for s in SABIOS]
     missing = [t for t in lines if t not in TR]
@@ -7514,6 +7545,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mute", action="store_true", help="sin sonido")
     ap.add_argument("--lowfx", action="store_true", help="sin bloom ni grano (equipos modestos)")
     ap.add_argument("--all", action="store_true", help="desbloquear toda la Commedia")
+    ap.add_argument("--limited", action="store_true", help="oficios limitados, como en el diseño original")
     ap.add_argument("--export-levels", metavar="CARPETA", help="escribir los 101 niveles en JSON (formato del diseño)")
     ap.add_argument("--custom", metavar="NIVEL.json", help="jugar un nivel propio en JSON")
     args = ap.parse_args(argv)

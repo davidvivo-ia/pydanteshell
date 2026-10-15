@@ -18,6 +18,11 @@ selftest comprueba.
     python pydanteshell.py --demo 4     # ver la solución del nivel 4
     python pydanteshell.py --level 33   # ir directo al Cocito
     python pydanteshell.py --all        # desbloquear la Commedia entera
+
+Ratón y teclado: 1–8 oficio · clic asignar · QWERTYUI palle · clic derecho naranja ·
+D Privilegio di Dioneo · F avance · Espacio pausa · Supr 2 s Dies Irae.
+Mando (SDL GameController): stick izq. cursor · A asignar · LB/RB oficio · X naranja ·
+cruceta + Y palle · LT/RT cadenza · Start pausa · Select Dioneo · Select+Start 2 s Dies Irae.
 """
 
 from __future__ import annotations
@@ -99,6 +104,9 @@ DIONEO_TICKS = 15 * TPS
 NIGHT_CYCLE = 52 * TPS
 NIGHT_LEN = 11 * TPS
 DAYS = 33.5
+CARRY_TICKS = 30  # Anteo baja a un alma al fondo del pozo
+STARE_TICKS = 3 * TPS  # los golosos se quedan mirando la fruta
+BLINK_ON, BLINK_OFF = 4 * TPS, 3 * TPS  # las promesas de la Luna
 
 
 def release_interval(rr: int) -> int:
@@ -109,7 +117,7 @@ def release_interval(rr: int) -> int:
 # Terreno (un byte por píxel)
 AIR, DIRT, STEEL, OW_L, OW_R = range(5)
 # Peligros (mapa aparte, no sólidos)
-HZ_NONE, HZ_LIQUID, HZ_FIRE, HZ_PURGE = range(4)
+HZ_NONE, HZ_LIQUID, HZ_FIRE, HZ_PURGE, HZ_FLIP = range(5)
 
 
 class Skill(StrEnum):
@@ -434,6 +442,33 @@ class Terrain:
             self.dirty = (min(a, x0), min(b, y0), max(c, x1), max(d, y1))
 
 
+class FlipTerrain(Terrain):
+    """La misma roca vista del revés, para quien cae hacia la luz.
+
+    Comparte memoria con el terreno original (vistas de numpy con paso negativo):
+    lo que se excava o se construye en un marco aparece en el otro.
+    """
+
+    def __init__(self, parent: Terrain):  # noqa: D107 — no llama a super a propósito
+        self.parent = parent
+        self.k = parent.k[::-1]
+        self.c = parent.c[::-1]
+        self.e = parent.e[::-1]
+        self.brick = parent.brick
+        self.h, self.w = parent.h, parent.w
+
+    @property
+    def dirty(self):
+        return self.parent.dirty
+
+    @dirty.setter
+    def dirty(self, v) -> None:
+        self.parent.dirty = v
+
+    def _mark(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        self.parent._mark(x0, self.h - y1, x1, self.h - y0)
+
+
 @dataclass(frozen=True)
 class Theme:
     key: str
@@ -593,8 +628,9 @@ def shade_region(kinds: np.ndarray, base: np.ndarray, rim: tuple[int, int, int],
 # Leyenda del mapa (cada carácter = 8×8 px):
 #   .  aire    #  roca    S  pietra serena (indestructible)    < >  sentido único
 #   ~  líquido letal (Aqueronte, Estigia, Flegetonte, pez, agua del Cocito)
-#   ^  fuego   %  fuego que purifica (Purgatorio VII)
+#   ^  fuego   %  fuego que purifica (Purgatorio VII)   |  centro de la Tierra (la gravedad se invierte)
 #   E  pila bautismal (entrada)    X  salida
+#   U  entrada y  x  salida «del revés»: para quien cae hacia la luz
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +657,7 @@ class GuardSpec:
     kind: str
     x: int
     y: int
+    inv: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -630,6 +667,7 @@ class PickSpec:
     y: int
     artist: str = ""
     need: bool = False  # la exige un guardián de este nivel
+    inv: bool = False  # en coordenadas del revés
 
 
 @dataclass
@@ -662,6 +700,9 @@ class Level:
     special: str = ""
     guide: str = "Virgilio"
     target_pct: int = 50
+    phantoms: tuple[tuple[int, int, int, int, str, bool], ...] = ()  # (x0, y0, x1, y1, tipo, del revés)
+    trees: tuple[tuple[int, int], ...] = ()
+    sabios: tuple[tuple[int, int, str, str], ...] = ()
 
 
 CANTICHE = {"proemio": "Proemio", "inferno": "Inferno", "purgatorio": "Purgatorio", "paradiso": "Paradiso"}
@@ -685,6 +726,7 @@ GUARDS = {
     "attesa": ("Gli Scomunicati", None, 30, "Los excomulgados esperan. Esperar también es trabajo."),
     "angelo": ("L'Angelo portiere", None, 15, "El ángel abre a quien espera. La gracia no se compra."),
     "pietro": ("San Pietro", None, 20, "Examen de fe. Espera la pregunta."),
+    "anteo": ("Anteo", None, 0, "Anteo, sin cadenas: «Ponci giù». Llega a su mano y te baja al fondo."),
     "giacomo": ("San Giacomo", None, 20, "Examen de esperanza."),
     "giovanni": ("San Giovanni", None, 20, "Examen de caridad."),
 }
@@ -711,13 +753,14 @@ def place_info(i: int) -> dict:
         P.update(place="Selva oscura", canto="Inf. I", theme="selva", name="Nel mezzo del cammin", guards=["lupa"],
                  palette=["wall"])
     elif i <= 3:
-        P.update(place="Antinferno", canto="Inf. III", theme="acheronte", name="Gli ignavi", palette=["wall", "dig", "drop_mine"])
+        P.update(place="Antinferno", canto="Inf. III", theme="acheronte", name="Gli ignavi", palette=["wall", "dig", "drop_mine"],
+                 mods={"banner"})
     elif i == 4:
         P.update(place="Acheronte", canto="Inf. III", theme="acheronte", name="Caron dimonio", guards=["caronte"],
                  palette=["pit", "wall"])
     elif i == 5:
         P.update(place="I · Limbo", canto="Inf. IV", theme="limbo", name="Il nobile castello", palette=["wall", "dig"],
-                 mods={"nodeath"})
+                 mods={"nodeath"}, special="limbo")
     elif i == 6:
         P.update(place="II · Lussuriosi", canto="Inf. V", theme="tempesta", name="La bufera infernal", guards=["minosse"],
                  palette=["drop_float", "wall"], mods={"wind"})
@@ -741,7 +784,7 @@ def place_info(i: int) -> dict:
                  guards=["centauri"] if i == 17 else [], palette=["pit", "wall", "drop_mine"])
     elif i <= 20:
         P.update(place="VII · Selva dei suicidi", canto="Inf. XIII", theme="selva", name="Pier della Vigna",
-                 guards=["arpie"] if i == 19 else [], palette=["wall", "dig", "drop_float"])
+                 guards=["arpie"] if i == 19 else [], palette=["wall", "dig", "drop_float"], mods={"suicidi"})
     elif i == 21:
         P.update(place="VII · Sabbione ardente", canto="Inf. XIV–XVI", theme="inferno", name="La pioggia di fuoco",
                  palette=["wall", "pit", "drop_mine"], extra=["mecenate"], mods={"firerain"})
@@ -762,13 +805,13 @@ def place_info(i: int) -> dict:
                  special="flame" if nm == "Consiglieri fraudolenti" else "")
     elif i == 32:
         P.update(place="Pozzo dei Giganti", canto="Inf. XXXI", theme="malebolge", name="Anteo",
-                 palette=["drop_mine", "drop_float"])
+                 palette=["drop_mine", "drop_anteo"])
     elif i == 33:
         P.update(place="IX · Cocito — Antenora", canto="Inf. XXXII–XXXIII", theme="cocito", name="La ghiaccia",
-                 palette=["pit", "wall", "dig"], special="toll")
+                 palette=["pit", "wall", "dig"], special="toll", mods={"ice"})
     elif i == 34:
         P.update(place="Lucifero", canto="Inf. XXXIV", theme="cocito", name="Lo 'mperador del doloroso regno",
-                 palette=["wall"], extra=["climb"], special="lucifero")
+                 palette=["wall"], special="lucifero", mods={"ice"})
     elif i <= 36:
         P.update(place="Spiaggia di Catone", canto="Purg. I–II", theme="spiaggia", name="Libertà va cercando",
                  guards=["catone"] if i == 35 else [], palette=["ascend", "wall"])
@@ -784,13 +827,13 @@ def place_info(i: int) -> dict:
                  guards=["angelo"], palette=["ascend", "wall"], extra=["cambio"])
     elif i <= 45:
         P.update(place="I · Superbi", canto="Purg. X–XII", theme="monte", name="Sotto il peso", palette=["ascend", "climb_up", "wall"],
-                 mods={"night", "stones"})
+                 mods={"night", "stones"}, sky="superbi")
     elif i <= 48:
         P.update(place="II · Invidiosi", canto="Purg. XIII–XV", theme="monte", name="Gli occhi cuciti",
-                 palette=["ascend", "wall", "climb_up"], mods={"night", "dark"})
+                 palette=["ascend", "wall", "climb_up"], mods={"night", "dark", "ghost"})
     elif i <= 51:
         P.update(place="III · Iracondi", canto="Purg. XV–XVII", theme="monte", name="Il fumo", palette=["ascend", "wall", "climb_up"],
-                 mods={"smoke"})
+                 mods={"smoke", "ghost"})
     elif i <= 54:
         P.update(place="IV · Accidiosi", canto="Purg. XVII–XVIII", theme="monte", name="Correre senza posa",
                  palette=["ascend", "climb_up", "wall"], mods={"fast"})
@@ -828,16 +871,22 @@ def place_info(i: int) -> dict:
         if sky == "stelle":
             g = [{89: "pietro", 90: "giacomo", 91: "giovanni"}[i]]
         P.update(place=f"Cielo di {nm}" if sky not in ("empireo", "visione", "primum") else nm, canto=canto, theme="paradiso",
-                 name=title, palette=["ascend", "climb_up", "wall"], sky=sky, guide=guide, guards=g)
+                 name=title, palette=["drop_float", "wall", "drop_mine"], sky=sky, guide=guide, guards=g, mods={"lux"})
+        if sky == "luna":
+            P["mods"] = {"lux", "blink"}
+            P["palette"] = ["drop_float", "wall"]
+        if sky == "venere":
+            P["mods"] = {"lux", "venus"}
         if sky == "saturno":
-            P["mods"] = {"silence"}
-            P["palette"] = ["climb_up", "ascend"]
+            P["mods"] = {"lux", "silence"}
+            P["palette"] = ["wall", "climb"]
         if sky == "mercurio":
             P["extra"] = ["temptation"]
         if sky == "primum":
             P["special"] = "primum"
         if sky == "visione":
             P["special"] = "final"
+            P["mods"] = set()
     return P
 
 
@@ -953,6 +1002,14 @@ class MapBuilder:
         self.fy += d
         self.descent += d
         self.flat(6)
+
+    def drop_anteo(self, d: int) -> None:
+        """El pozo de los gigantes: Anteo recoge a quien llega al borde y lo deja abajo."""
+        self.flat(4)
+        self.guards.append(GuardSpec("anteo", self.c * CELL - 2, self.fy * CELL))
+        self.fy += d
+        self.descent += d
+        self.flat(7)
 
     def dig(self) -> None:
         self.flat(4)
@@ -1070,6 +1127,7 @@ HINTS = {
     "climb": "Un muro alto sin otra salida: Pellegrini, todos.",
     "climb_up": "Una cornisa vertical: solo el bordón del Pellegrino sube por ella.",
     "ascend": "Una cornisa a dos bloques: doce ladrillos de Capomastro, empezando a tiempo.",
+    "drop_anteo": "El pozo de los gigantes: Anteo baja a quien llega al borde. No hace falta oficio, solo paciencia.",
 }
 
 GUIDE_LINES = {
@@ -1101,7 +1159,7 @@ def build_level(i: int) -> Level:
     span = {"proemio": (0, 1), "inferno": (1, 34), "purgatorio": (35, 67), "paradiso": (68, 100)}[cantica]
     prog = (i - span[0]) / max(1, span[1] - span[0])
     tier = min(3, int(prog * 4))
-    descending = cantica in ("proemio", "inferno")
+    descending = cantica in ("proemio", "inferno", "paradiso")
     total = 100 if P["special"] == "final" else 20 + round(30 * (i / 100))
     if P["special"] == "final":
         mb = MapBuilder(30, mods)
@@ -1125,9 +1183,9 @@ def build_level(i: int) -> Level:
                 pits += 1 if choice == "pit" else 0
             seq.append(choice)
     if P["special"] == "lucifero":
-        seq = ["wall", "climb"]
+        return _lucifero(i, P, mods, total, tier, rng)
     # presupuesto vertical
-    drops = {"drop_float": 10, "drop_mine": 9, "dig": 6}
+    drops = {"drop_float": 10, "drop_mine": 9, "dig": 6, "drop_anteo": 10}
     rises = {"ascend": 2, "climb_up": 5}
     if descending:
         budget = 24
@@ -1183,6 +1241,8 @@ def build_level(i: int) -> Level:
                 mb.climb_up(rng.choice((5, 5, 6)))
             case "ascend":
                 mb.ascend()
+            case "drop_anteo":
+                mb.drop_anteo(rng.randint(9, 11))
         if "vents" in P["extra"] and k == 0:
             mb.vent_row(2 + tier // 2)
         if "boulders" in P["extra"] and k == 0:
@@ -1195,10 +1255,60 @@ def build_level(i: int) -> Level:
         mb.climb(6)
     mb.flat(4)
     mb.finish()
-    return _assemble(i, P, mb, mods, total, cantica, tier, seq=seq, rng=rng)
+    return _assemble(i, P, mb, mods, total, cantica, tier, seq=seq, rng=rng, flip="lux" in mods)
 
 
-def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), rng=None) -> Level:
+def _flip_cols(cols: list[list[str]]) -> list[list[str]]:
+    """Da la vuelta a unas columnas construidas en el marco de quien cae hacia arriba."""
+    table = {"E": "U", "e": "u", "X": "x"}
+    return [[table.get(ch, ch) for ch in reversed(col)] for col in cols]
+
+
+def _lucifero(i, P, mods, total, tier, rng) -> Level:
+    """Inf. XXXIV: se baja por el pelo de Lucifer, en el centro de la Tierra la gravedad
+    se invierte y se sale, cabeza abajo, por la natural burella."""
+    from dataclasses import replace as _rp
+    mb = MapBuilder(14, mods)
+    mb.start()
+    mb.wall(4, 3)
+    mb.flat(3)
+    mb.drop_float(10)
+    fyl = mb.fy
+    mb.flat(4)
+    ceil_row = fyl - 7  # techo de roca a 56 px del suelo
+    # el techo se adelanta sobre la izquierda y acaba en un colmillo que frena a los del revés
+    for k, col in enumerate(mb.cols[-8:]):
+        for r in range(0, ceil_row + 1):
+            col[r] = "#"
+        if k == 0:
+            for r in range(ceil_row + 1, ceil_row + 5):
+                col[r] = "#"
+        if k == 1:  # visera: el Pellegrino del revés no puede coronar el colmillo
+            col[ceil_row + 4] = "#"
+    off = mb.c
+    mb2 = MapBuilder(ROWS - 1 - ceil_row, mods)
+    mb2.flat(10)
+    mb2.climb(6)
+    mb2.flat(6)
+    mb2.climb(5)
+    mb2.flat(4)
+    mb2.finish()
+    right = _flip_cols(mb2.cols)
+    for k in range(2):
+        for r in range(fyl - 6, min(ROWS, fyl + 3)):
+            if right[k][r] == ".":
+                right[k][r] = "|"
+    mb.cols += right
+    mb.rules += [_rp(r, x=r.x + off * CELL) if r.x is not None else r for r in mb2.rules]
+    for s, n in mb2.need.items():
+        mb.need[s] = mb.need.get(s, 0) + n
+    mb.climbers = True
+    mb.pickups += [_rp(p, x=p.x + off * CELL, inv=True) for p in mb2.pickups]
+    return _assemble(i, P, mb, mods, total, "inferno", tier, seq=["wall", "drop_float", "climb"], rng=rng)
+
+
+
+def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), rng=None, flip=False) -> Level:
     rng = rng or random.Random(i)
     rules = list(mb.rules)
     need = dict(mb.need)
@@ -1222,10 +1332,41 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
         skills[s] += 1
     if "fast" in mods:
         skills[Skill.FLAGELLANTE] = 0
+    if "ingegno" == GIORNATE_MODS[giornata_of(i)]:
+        # Neifile: la mitad de los oficios extra están escondidos en el nivel
+        hidden = [s for s in SKILLS if skills[s] and s not in (Skill.GERIONE, Skill.PELLEGRINO)][1::2]
+    else:
+        hidden = []
     # Coleccionables: palle y la pagina del nivel
     pickups = list(mb.pickups)
+    rule_x = [r.x for r in rules if r.x is not None]
     flats = [f for f in mb.flats if all(abs(f[0] - p.x) > 24 for p in pickups)]
     rng.shuffle(flats)
+    for s in hidden:
+        if flats:
+            x, y = flats.pop()
+            pickups.append(PickSpec("oficio", x, y, s.value))
+    phantoms: list[tuple[int, int, int, int, str, bool]] = []
+    shelf_kind = "blink" if "blink" in mods else "ghost" if "ghost" in mods else None
+    if shelf_kind:
+        # una cornisa que aparece y desaparece: la pagina está encima
+        for k, (x, y) in enumerate(flats):
+            if y > 0 and all(abs(x - rx) > 70 for rx in rule_x) and 40 < x < len(mb.cols) * CELL - 60:
+                flats.pop(k)
+                phantoms.append((x - 18, y - 16, x + 18, y - 13, shelf_kind, False))
+                pickups.append(PickSpec("pagina", x, y - 16))
+                break
+    trees: list[tuple[int, int]] = []
+    if "trees" in mods:
+        for x, y in flats[:2]:
+            if y > 0:
+                trees.append((x, y))
+        flats = flats[2:]
+    sabios: list[tuple[int, int, str, str]] = []
+    if P["special"] == "limbo":
+        for (x, y), (nm, line) in zip(flats[:3], SABIOS):
+            sabios.append((x, y, nm, line))
+        flats = flats[3:]
     reds = {"proemio": ["medicinale"], "inferno": ["cambio", "arancia", "medicinale", "congiura", "mecenate"],
             "purgatorio": ["medicinale", "mecenate", "arancia", "cambio"], "paradiso": ["mecenate", "medicinale"]}[cantica]
     n_palle = 1 + (i % 3 == 0) if cantica != "paradiso" else (i % 2)
@@ -1249,13 +1390,22 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
         for x, y in flats[:5]:
             pickups.append(PickSpec(reds[len(pickups) % len(reds)], x, y - 26))
         flats = flats[5:]
-    if flats and P["special"] != "final":
+    if flats and P["special"] != "final" and not any(p.kind == "pagina" for p in pickups):
         x, y = flats.pop()
-        pickups.append(PickSpec("pagina", x, y))
+        pickups.append(PickSpec("pagina", x, abs(y), inv=y < 0))
     elif P["special"] == "final":
         pickups.append(PickSpec("pagina", 360, 30 * CELL))
+    if P["special"] == "rogo":  # más pagine que salvar de la hoguera
+        for x, y in flats[:2]:
+            pickups.append(PickSpec("pagina", x, y))
     vault = cantica == "inferno" and not mb.climbers and P["theme"] not in ("limbo",)
     rows = mb.rows(random.Random(i * 13 + 1) if vault else None)
+    guards = tuple(mb.guards)
+    if flip:
+        rows = tuple("".join(r) for r in zip(*_flip_cols([list(c) for c in zip(*rows)])))
+        guards = tuple(GuardSpec(g.kind, g.x, g.y, True) for g in guards)
+        pickups = [PickSpec(p.kind, p.x, p.y, p.artist, p.need, True) for p in pickups]
+        phantoms = [(a, b, c, d, k, True) for a, b, c, d, k, _ in phantoms]
     width = len(rows[0]) * CELL
     walk_s = width / TPS
     minutes = math.ceil((walk_s * 1.6 + total * release_interval(rr) / TPS + 50 + 25 * len(mb.guards)
@@ -1272,17 +1422,30 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
     hint_bits = [HINTS[s] for s in dict.fromkeys(seq) if s in HINTS][:2]
     if mb.guards:
         hint_bits.append(GUARDS[mb.guards[0].kind][3])
+    if flip:
+        hint_bits.insert(0, "Aquí no se cae hacia abajo: se cae hacia la luz.")
+    if P["special"] == "lucifero":
+        hint_bits = ["Bajad por el pelo del Emperador. En el centro de la Tierra todo se da la vuelta: lo que era techo será suelo.",
+                     "Al otro lado, Pellegrini para todos."]
     guide = P["guide"]
     lines = GUIDE_LINES[guide]
     hint = " ".join(hint_bits) or lines[i % len(lines)]
     return Level(
         id=i, name=P["name"], place=P["place"], canto=P["canto"], cantica=cantica, giornata=giornata_of(i),
         difficulty=DIFFICULTIES[tier], total=total, to_save=to_save, rr=rr, minutes=minutes, skills=skills,
-        theme=P["theme"], map=rows, solution=tuple(rules), pickups=tuple(pickups), guards=tuple(mb.guards),
+        theme=P["theme"], map=rows, solution=tuple(rules), pickups=tuple(pickups), guards=guards,
         vents=tuple(mb.vents), boulders=tuple(mb.boulders), mods=frozenset(mods), moria=P["moria"], fire=fire,
         sermon=SERMONS[i % len(SERMONS)], hint=hint, sky=P["sky"], special=P["special"], guide=guide,
-        target_pct=target,
+        target_pct=target, phantoms=tuple(phantoms), trees=tuple(trees), sabios=tuple(sabios),
     )
+
+
+SABIOS = [
+    ("Omero", "«Quelli è Omero poeta sovrano» (Inf. IV, 88)."),
+    ("Aristotele", "«…il maestro di color che sanno» (Inf. IV, 131)."),
+    ("Averroè", "«Averoìs, che 'l gran comento feo» (Inf. IV, 144)."),
+]
+GIORNATE_MODS = ["", "resurrect", "ingegno", "pairs", "pairs_safe", "lure_bounce", "lure_long", "fake", "", "magnanimo"]
 
 
 @dataclass(slots=True)
@@ -1290,12 +1453,14 @@ class Entrance:
     x: int
     y: int
     dir: int
+    inv: bool = False
 
 
 @dataclass(slots=True)
 class Exit:
     x: int
     y: int
+    inv: bool = False
 
 
 def parse_map(rows: tuple[str, ...]):
@@ -1333,6 +1498,13 @@ def parse_map(rows: tuple[str, ...]):
                     hazard[y0 : y0 + CELL, x0 : x0 + CELL] = HZ_FIRE
                 case "%":
                     hazard[y0 : y0 + CELL, x0 : x0 + CELL] = HZ_PURGE
+                case "|":
+                    hazard[y0 : y0 + CELL, x0 : x0 + CELL] = HZ_FLIP
+                case "U" | "u":
+                    # en el marco del revés: fila r real ↔ fila ROWS-1-r
+                    entrances.append(Entrance(x0 + CELL // 2, (ROWS - r - pad) * CELL, 1 if ch == "U" else -1, True))
+                case "x":
+                    exits.append(Exit(x0 + CELL // 2, (ROWS - r - pad) * CELL, True))
                 case "E" | "e":
                     entrances.append(Entrance(x0 + CELL // 2, y0 + CELL, 1 if ch == "E" else -1))
                 case "X":
@@ -1341,9 +1513,10 @@ def parse_map(rows: tuple[str, ...]):
     return kinds, hazard, entrances, exits
 
 
-# Calibración: almas que salva la solución de referencia en cada nivel
-# (python pydanteshell.py --calibrate). El mínimo exigido nunca la supera.
-CALIBRATION: dict[int, int] = {0: 21, 1: 20, 2: 21, 3: 21, 4: 20, 5: 22, 6: 22, 7: 19, 8: 22, 9: 12, 10: 17, 11: 22, 12: 23, 13: 24, 14: 24, 15: 19, 16: 22, 17: 24, 18: 24, 19: 26, 20: 26, 21: 22, 22: 27, 23: 25, 24: 16, 25: 25, 26: 26, 27: 21, 28: 23, 29: 22, 30: 26, 31: 17, 32: 30, 33: 29, 34: 30, 35: 30, 36: 31, 37: 31, 38: 31, 39: 32, 40: 32, 41: 32, 42: 33, 43: 33, 44: 33, 45: 34, 46: 34, 47: 34, 48: 34, 49: 35, 50: 35, 51: 35, 52: 36, 53: 36, 54: 36, 55: 28, 56: 35, 57: 36, 58: 37, 59: 38, 60: 38, 61: 29, 62: 36, 63: 35, 64: 29, 65: 30, 66: 40, 67: 40, 68: 40, 69: 41, 70: 41, 71: 41, 72: 42, 73: 42, 74: 42, 75: 42, 76: 43, 77: 43, 78: 43, 79: 44, 80: 44, 81: 44, 82: 45, 83: 45, 84: 45, 85: 46, 86: 46, 87: 46, 88: 46, 89: 47, 90: 47, 91: 47, 92: 48, 93: 48, 94: 48, 95: 48, 96: 49, 97: 49, 98: 49, 99: 50, 100: 100}
+# Calibración: almas que salva la solución de referencia en cada nivel, en el peor
+# caso entre una Compagnia ligera y otra cargada (python pydanteshell.py --calibrate).
+# El mínimo exigido nunca la supera.
+CALIBRATION: dict[int, int] = {0: 21, 1: 20, 2: 21, 3: 21, 4: 20, 5: 22, 6: 22, 7: 19, 8: 22, 9: 12, 10: 17, 11: 22, 12: 23, 13: 24, 14: 24, 15: 19, 16: 22, 17: 24, 18: 24, 19: 26, 20: 26, 21: 17, 22: 27, 23: 25, 24: 16, 25: 25, 26: 26, 27: 18, 28: 23, 29: 22, 30: 26, 31: 17, 32: 30, 33: 29, 34: 30, 35: 30, 36: 31, 37: 31, 38: 31, 39: 32, 40: 32, 41: 32, 42: 33, 43: 33, 44: 33, 45: 34, 46: 34, 47: 34, 48: 34, 49: 35, 50: 35, 51: 35, 52: 36, 53: 36, 54: 36, 55: 28, 56: 24, 57: 34, 58: 37, 59: 38, 60: 38, 61: 19, 62: 34, 63: 26, 64: 29, 65: 30, 66: 40, 67: 40, 68: 40, 69: 41, 70: 41, 71: 41, 72: 42, 73: 42, 74: 42, 75: 42, 76: 43, 77: 43, 78: 43, 79: 44, 80: 44, 81: 44, 82: 45, 83: 45, 84: 45, 85: 46, 86: 46, 87: 46, 88: 46, 89: 47, 90: 47, 91: 47, 92: 48, 93: 48, 94: 48, 95: 48, 96: 49, 97: 49, 98: 49, 99: 50, 100: 100}
 
 
 @lru_cache(maxsize=None)
@@ -1381,6 +1554,10 @@ class Lemming:
     fervor: int = 0
     grace: bool = False
     purified: bool = False
+    inv: bool = False  # cae hacia arriba (Lucifer, Paraíso)
+    carry: list | None = None  # en la mano de Anteo
+    stare: int = 0
+    stared: bool = False
 
 
 @dataclass(slots=True)
@@ -1392,6 +1569,7 @@ class Guardian:
     touched: bool = False
     timer: int = 0
     anim: int = 0
+    inv: bool = False
 
     @property
     def name(self) -> str:
@@ -1409,6 +1587,7 @@ class Pickup:
     y: int
     artist: str = ""
     need: bool = False
+    inv: bool = False
     taken: bool = False
     fake: bool = False
 
@@ -1464,8 +1643,12 @@ class World:
         theme = THEMES[level.theme]
         self.theme = theme
         colors, emis = colorize(kinds, theme, rng)
-        self.terrain = Terrain(kinds, colors, emis, theme.brick)
-        self.hazard = hazard
+        self.terrain = self.tn = Terrain(kinds, colors, emis, theme.brick)
+        self.ti = FlipTerrain(self.tn)
+        self.hazard = self.hn = hazard
+        self.hi = hazard[::-1]
+        self._inv = False
+        self.msg_serial = 0
         self.rng = rng
         self.mods = set(level.mods)
         g = GIORNATE[level.giornata][2]
@@ -1476,8 +1659,9 @@ class World:
         self.total = level.total
         self.skills: dict[Skill, int] = {s: level.skills.get(s, 0) for s in SKILLS}
         if "ingegno" in self.mods:
+            hidden = {p.artist for p in level.pickups if p.kind == "oficio"}
             for s in SKILLS:
-                if self.skills[s]:
+                if self.skills[s] and s.value not in hidden:
                     self.skills[s] += 1
         self.rr_min = self.rr = level.rr
         self.tick_count = 0
@@ -1505,8 +1689,23 @@ class World:
         self.dioneo_avail = camp.dioneo
         self.dioneo_used = False
         # entidades
-        self.guards = [Guardian(g.kind, g.x, g.y) for g in level.guards]
-        self.pickups = [Pickup(p.kind, p.x, p.y, p.artist, p.need) for p in level.pickups]
+        self.guards = [Guardian(g.kind, g.x, g.y, inv=g.inv) for g in level.guards if g.kind != "anteo"]
+        self.anteo = [(g.x, g.y) for g in level.guards if g.kind == "anteo"]
+        self.pickups = [Pickup(p.kind, p.x, p.y, p.artist, p.need, p.inv) for p in level.pickups]
+        # cornisas que van y vienen (Luna) u ocultas hasta que llega la luz (Lume, Botticelli)
+        self.phantoms: list[dict] = []
+        for x0, y0, x1, y1, kind, inv in level.phantoms:
+            if inv:
+                y0, y1 = VIEW_H - y1, VIEW_H - y0
+            self.phantoms.append({"r": (x0, y0, x1, y1), "kind": kind, "on": False, "mask": None})
+        self.drops: list[list[int]] = []  # lluvia de fuego del sabbione
+        self.canopies = 0
+        self.banner: list | None = None
+        if "banner" in self.mods and self.entrances:
+            self.banner = [float(self.entrances[0].x + 60), 1, 45 * TPS]
+        self.trees = list(level.trees)
+        self.sabios = [list(s) + [False] for s in level.sabios]
+        self.lonely: set[int] = set()
         if "fake" in self.mods:
             reds = [p for p in self.pickups if p.kind in RED_PALLE and not p.need]
             if len(reds) > 1:
@@ -1559,6 +1758,16 @@ class World:
             self.say("Aviñón, 20 de octubre de 1349: la bula de Clemente VI condena a los flagelantes.", "Virgilio")
         if level.special == "lucifero":
             self.say("Trepa por su pelo. Al otro lado del centro de la Tierra están las estrellas.", "Virgilio")
+        if "lux" in self.mods and level.id == 68:
+            self.say("Aquí no se cae hacia abajo: se cae hacia la luz. Mira arriba.", "Beatrice")
+        if level.id == 41:
+            self.say("El Ángel graba siete P en cada frente. Cada cornisa borrará una.", "Virgilio")
+        if level.id == 66:
+            self.say("«Libero, dritto e sano è tuo arbitrio… per ch'io te sovra te corono e mitrio.» (Purg. XXVII)", "Virgilio")
+        if level.id == 67:
+            self.say("Virgilio se ha ido. Llega Beatrice, velada, entre flores.", "")
+        if "suicidi" in self.mods:
+            self.say("Cada rama que se rompe aquí sangra. Excavar cuesta Peso.", "Virgilio")
 
     # ── utilidades ───────────────────────────────────────────────────────
     def _floor_at(self, x: int) -> int | None:
@@ -1570,6 +1779,34 @@ class World:
 
     def say(self, text: str, who: str = "") -> None:
         self.messages.append([text, 6 * TPS + len(text) * 2, who])
+        self.msg_serial += 1
+
+    def emit(self, ev: tuple) -> None:
+        if self._inv:
+            ev = (ev[0], ev[1], VIEW_H - 1 - ev[2], *ev[3:])
+        self.fx.append(ev)
+
+    def _frame(self, inv: bool) -> None:
+        """Elige el marco de referencia: el del mundo o el de quien cae hacia la luz."""
+        self._inv = inv
+        if inv:
+            self.terrain, self.hazard = self.ti, self.hi
+        else:
+            self.terrain, self.hazard = self.tn, self.hn
+
+    @staticmethod
+    def ry(L) -> int:
+        """Altura real de los pies."""
+        return VIEW_H - 1 - L.y if L.inv else L.y
+
+    @staticmethod
+    def rmid(L) -> int:
+        """Altura real del centro del cuerpo."""
+        return VIEW_H + 5 - L.y if L.inv else L.y - 6
+
+    @property
+    def has_inv(self) -> bool:
+        return any(e.inv for e in self.entrances) or "lux" in self.mods or self.level.special == "lucifero"
 
     def rule_off(self, m: str) -> bool:
         return m in self.mods and self.dioneo == 0
@@ -1632,7 +1869,7 @@ class World:
         return False
 
     def lemmings_at(self, cx: int, cy: int) -> list[Lemming]:
-        return [L for L in self.lemmings if not L.removed and abs(L.x - cx) <= 5 and L.y - 13 <= cy <= L.y + 2]
+        return [L for L in self.lemmings if not L.removed and abs(L.x - cx) <= 5 and abs(self.rmid(L) - cy) <= 8]
 
     def pick(self, cx: int, cy: int, skill: Skill | None) -> tuple[Lemming | None, int]:
         cands = self.lemmings_at(cx, cy)
@@ -1640,13 +1877,14 @@ class World:
             return None, 0
         able = [L for L in cands if skill and self.can_assign(L, skill)]
         pool = able or cands
-        best = min(pool, key=lambda L: (abs(L.x - cx) + abs(L.y - 6 - cy), L.id))
+        best = min(pool, key=lambda L: (abs(L.x - cx) + abs(self.rmid(L) - cy), L.id))
         return best, len(cands)
 
     def guard_near(self, x: int, y: int, r: int = 28) -> Guardian | None:
         best = None
         for g in self.guards:
-            if not g.pacified and abs(g.x - x) <= r and abs(g.y - 10 - y) <= r + 6:
+            gy = VIEW_H + 9 - g.y if g.inv else g.y - 10
+            if not g.pacified and abs(g.x - x) <= r and abs(gy - y) <= r + 6:
                 best = g
         return best
 
@@ -1687,10 +1925,23 @@ class World:
 
     def assign(self, lid: int, skill: Skill) -> bool:
         L = self.by_id.get(lid)
+        if L is not None and L.state == St.BLOCK and "paradiso" in self.mods and not L.removed:
+            # en el Paraíso el Flagellante solo necesita que alguien le convenza de seguir
+            self._set(L, St.WALK)
+            L.fervor = 0
+            self.emit(("grace", L.x, L.y - 8))
+            self.say("El Flagellante deja el látigo y sigue a los demás.", "Beatrice")
+            self.events.append("cure")
+            return True
         if L is None or self.skills[skill] <= 0 or not self.can_assign(L, skill):
             return False
         self.skills[skill] -= 1
         L.fervor = 0
+        L.stare = 0
+        if "suicidi" in self.mods and skill in (Skill.PIAGNONE, Skill.MINATORE, Skill.BECCHINO, Skill.BUBBONE):
+            self.peso += 1
+            self.notes.append("«Perché mi schiante?»: +1 de Peso")
+            self.say("«Perché mi schiante?» (Inf. XIII). El bosque sangra: +1 de Peso.", "Pier della Vigna")
         match skill:
             case Skill.PELLEGRINO:
                 L.climber = True
@@ -1748,7 +1999,7 @@ class World:
                 return True
             case "arancia":
                 self._spend(slot)
-                self.fx.append(("orange", x, y))
+                self.emit(("orange", x, y))
                 if g is not None and g.needs == "arancia":
                     self._pacify(g, f"{g.name} se arroja sobre la naranja. El paso queda libre.")
                     return True
@@ -1760,13 +2011,13 @@ class World:
                 self._spend(slot)
                 n = 0
                 for L in self.lemmings:
-                    if not L.removed and (L.x - x) ** 2 + (L.y - 6 - y) ** 2 <= 48 * 48:
+                    if not L.removed and (L.x - x) ** 2 + (self.rmid(L) - y) ** 2 <= 48 * 48:
                         n += L.moria > 0
                         L.moria = L.moria_t = 0
                         L.immune = IMMUNE_TICKS
                 self.focos = [f for f in self.focos if (f[0] - x) ** 2 + (f[1] - y) ** 2 > 48 * 48]
                 self.corpses = [c for c in self.corpses if (c[0] - x) ** 2 + (c[1] - y) ** 2 > 48 * 48]
-                self.fx.append(("cure", x, y))
+                self.emit(("cure", x, y))
                 self.events.append("cure")
                 self.say(f"Cosme y Damián: {n} curados. Quince segundos de inmunidad.", "")
                 return True
@@ -1774,10 +2025,21 @@ class World:
                 artist = self.pick_artist(slot)
                 self._spend(slot)
                 if artist == "brunelleschi":
-                    for dy in range(3):
-                        self.terrain.add_row(x - 30, x + 30, y + dy, np.array((236, 204, 150), dtype=np.uint8))
-                    self.fx.append(("dome", x, y))
-                    self.say("Brunelleschi: doble casco, sin cimbra. Un puente donde no lo había.", "Brunelleschi")
+                    col = np.array((236, 204, 150), dtype=np.uint8)
+                    if "firerain" in self.mods:
+                        # una cúpula colgada en el aire: la lluvia de fuego choca con ella
+                        ground = self._floor_at(min(max(x, 0), self.tn.w - 1)) or y
+                        for dx in range(-30, 31):
+                            yy = ground - 30 + int(12 * (dx / 30) ** 2)
+                            self.tn.add_row(x + dx, x + dx, yy, col)
+                            self.tn.add_row(x + dx, x + dx, yy + 1, col)
+                        self.canopies += 1
+                        self.say("Brunelleschi: doble casco, sin cimbra. Bajo la cúpula no llueve fuego.", "Brunelleschi")
+                    else:
+                        for dy in range(3):
+                            self.tn.add_row(x - 30, x + 30, y + dy, col)
+                        self.say("Brunelleschi: doble casco, sin cimbra. Un puente donde no lo había.", "Brunelleschi")
+                    self.emit(("dome", x, y))
                 elif artist == "botticelli":
                     self.reveal = True
                     self.say("Botticelli dibuja la Mappa dell'Inferno: todo queda a la vista.", "Botticelli")
@@ -1796,7 +2058,7 @@ class World:
                 if self.level.special == "final":
                     self.shield.pop(slot)
                     self.used["giglio"] = 1
-                    self.fx.append(("release", x, y))
+                    self.emit(("release", x, y))
                     self.events.append("lume")
                     self.say("El escudo de Lorenzo cae girando hasta perderse. Ya no hay nada que llevar.", "San Bernardo")
                     return True
@@ -1819,8 +2081,8 @@ class World:
         A.x, B.x = B.x, A.x
         A.y, B.y = B.y, A.y
         A.dir, B.dir = B.dir, A.dir
-        self.fx.append(("swap", A.x, A.y))
-        self.fx.append(("swap", B.x, B.y))
+        self.emit(("swap", A.x, A.y))
+        self.emit(("swap", B.x, B.y))
         self.say("Dos almas cambian de lugar. Alguien, en algún sitio, lo cobrará.", "")
         return True
 
@@ -1836,7 +2098,7 @@ class World:
 
     def _pacify(self, g: Guardian, msg: str) -> None:
         g.pacified = True
-        self.fx.append(("pacify", g.x, g.y - 12))
+        self.fx.append(("pacify", g.x, VIEW_H + 11 - g.y if g.inv else g.y - 12))
         self.events.append("bribe")
         self.say(msg, g.name)
 
@@ -1866,13 +2128,20 @@ class World:
                 self.lume = None
         if self.level.fire and self.tick_count > self.level.fire[0]:
             self.fire_y -= self.level.fire[1]
-        self.blockers = [(L.x, L.y, BLOCK_RANGE) for L in self.lemmings
+        self.blockers = [(L.x, L.y, BLOCK_RANGE, L.inv) for L in self.lemmings
                          if L.state == St.BLOCK and not L.removed and "paradiso" not in self.mods]
-        self.blockers += [(g.x, g.y, GUARD_RANGE) for g in self.guards if not g.pacified]
+        self.blockers += [(g.x, g.y, GUARD_RANGE, g.inv) for g in self.guards if not g.pacified]
         night = self.night
+        self._phantoms()
+        self._banner()
+        if "venus" in self.mods and self.tick_count % 8 == 0:
+            self._venus()
+        if self.level.special == "rogo" and self.tick_count % (18 * TPS) == 9 * TPS:
+            self.say(SAVONAROLA[(self.tick_count // (18 * TPS)) % len(SAVONAROLA)], "Savonarola")
         for L in self.lemmings:
             if L.removed:
                 continue
+            self._frame(L.inv)
             if L.bomb is not None and L.state not in DOOMED:
                 L.bomb -= 1
                 if L.bomb <= 0:
@@ -1887,7 +2156,10 @@ class World:
             if not L.removed:
                 self._hazards(L)
                 if not L.removed and L.state not in DOOMED:
+                    self._frame(L.inv)
                     self._pickups(L)
+        self._frame(False)
+        self._firerain()
         if self.tick_count % 4 == 0:
             self._contagion()
         self._rats()
@@ -1928,14 +2200,14 @@ class World:
                 self.statues.append((x, y))
                 self.release_timer = release_interval(self.rr) // 2
                 return
-            L = Lemming(self.released, e.x, e.y, e.dir)
+            L = Lemming(self.released, e.x, e.y, e.dir, inv=e.inv)
             if L.id in self.infect_ids:
                 L.moria = 1
             self._add(L)
             self.released += 1
             self.release_timer = release_interval(self.rr)
         elif self.maestro_due and self.maestro is None:
-            L = Lemming(10_000, e.x, e.y, e.dir, maestro=True)
+            L = Lemming(10_000, e.x, e.y, e.dir, maestro=True, inv=e.inv)
             self.maestro = L
             self._add(L)
             self.say("Il Maestro Lapo cierra la procesión, látigo en mano.", "")
@@ -1954,8 +2226,17 @@ class World:
     def _walk_moves(self, L: Lemming, night: bool) -> int:
         if night:
             return 0
+        if L.stare > 0:  # se queda mirando la fruta
+            L.stare -= 1
+            return 0
         t = self.tick_count + L.id
+        if "paradiso" in self.mods and L.fervor > FERVOR_SLOW and t % 80 < 24 and not self.dioneo:
+            return 0  # deslumbrado: quien se azota no puede mirar la luz
         n = 2 if (self.rule_off("fast") or self.combo) else 1
+        if self.rule_off("ice") and t % 3 == 0:
+            n += 1  # el hielo del Cocito no deja pararse
+        if L.id in self.lonely and t % 2 == 0:
+            n -= 1  # Venus: sola, el alma no tiene prisa
         if self.panic and not self.combo and t % 2 == 0:
             n += 1
         if L.moria == 1 and t % 7 == 0:
@@ -1969,14 +2250,27 @@ class World:
         return max(0, n)
 
     def _step(self, L: Lemming, night: bool) -> None:
+        if L.carry is not None:
+            c = L.carry
+            c[0] += 1
+            f = min(1.0, c[0] / CARRY_TICKS)
+            L.x = round(c[1] + (c[3] - c[1]) * f)
+            L.y = round(c[2] + (c[4] - c[2]) * f - 18 * math.sin(f * math.pi))
+            if f >= 1:
+                L.carry = None
+                L.x, L.y = c[3], c[4]
+                self._set(L, St.WALK)
+            return
         if L.state in NEEDS_FLOOR and not self.terrain.solid(L.x, L.y):
             self._set(L, St.FALL)
         match L.state:
             case St.WALK:
                 L.fervor += 1
-                if self.lure and abs(L.x - self.lure[0]) < (120 if "lure_bounce" in self.mods else 80) and abs(L.y - self.lure[1]) < 64:
+                if self.lure and abs(L.x - self.lure[0]) < (120 if "lure_bounce" in self.mods else 80) and abs(self.ry(L) - self.lure[1]) < 64:
                     if abs(L.x - self.lure[0]) > 3:
                         L.dir = 1 if self.lure[0] > L.x else -1
+                if self.banner and not L.inv and abs(L.x - self.banner[0]) < 56 and abs(L.x - self.banner[0]) > 4:
+                    L.dir = 1 if self.banner[0] > L.x else -1
                 if self.panic and not self.combo and self.rng.random() < 0.015:
                     L.dir = -L.dir
                 for _ in range(self._walk_moves(L, night)):
@@ -2032,11 +2326,11 @@ class World:
                     else:
                         self.saved += 1
                     self.events.append("yippee")
-                    self.fx.append(("saved", L.x, L.y - 6))
+                    self.emit(("saved", L.x, L.y - 6))
 
     def _in_block_field(self, L: Lemming) -> bool:
-        for bx, by, rng_ in self.blockers:
-            if (bx, by) != (L.x, L.y) and abs(by - L.y) <= 8 and 0 < (bx - L.x) * L.dir <= rng_:
+        for bx, by, rng_, binv in self.blockers:
+            if binv == L.inv and (bx, by) != (L.x, L.y) and abs(by - L.y) <= 8 and 0 < (bx - L.x) * L.dir <= rng_:
                 return True
         return False
 
@@ -2071,13 +2365,13 @@ class World:
         if lethal and L.fall > LETHAL_FALL and "nodeath" not in self.mods:
             if "giglio" in self.shield and not L.grace:
                 L.grace = True
-                self.fx.append(("grace", L.x, L.y - 6))
+                self.emit(("grace", L.x, L.y - 6))
                 self.events.append("cure")
                 self._set(L, St.WALK)
                 return
             self._set(L, St.SPLAT)
             self.events.append("splat")
-            self.fx.append(("blood", L.x, L.y))
+            self.emit(("blood", L.x, L.y))
         else:
             self._set(L, St.WALK)
 
@@ -2183,7 +2477,7 @@ class World:
             self._set(L, St.WALK)
             return
         if t.erase(x0, L.y - 9, mask, L.dir) and L.frame in (3, 11):
-            self.fx.append(("dust", L.x + 4 * L.dir, L.y - 5))
+            self.emit(("dust", L.x + 4 * L.dir, L.y - 5))
         L.x += L.dir
         if not t.solid(L.x, L.y):
             for d in range(1, STEP_DOWN + 1):
@@ -2210,7 +2504,7 @@ class World:
             self._set(L, St.WALK)
             return
         t.erase(x0, L.y - 9, mask, L.dir)
-        self.fx.append(("dust", L.x + 3 * L.dir, L.y - 2))
+        self.emit(("dust", L.x + 3 * L.dir, L.y - 2))
         L.x += 2 * L.dir
         L.y += 1
         if not t.solid(L.x, L.y):
@@ -2228,7 +2522,7 @@ class World:
             return
         t.erase(L.x - 4, L.y, DIG_MASK, 0)
         if L.y % 3 == 0:
-            self.fx.append(("dust", L.x, L.y))
+            self.emit(("dust", L.x, L.y))
         # el sepulturero entierra los focos que encuentra
         self.focos = [f for f in self.focos if (f[0] - L.x) ** 2 + (f[1] - L.y) ** 2 > 18 * 18]
         self.corpses = [c for c in self.corpses if (c[0] - L.x) ** 2 + (c[1] - L.y) ** 2 > 18 * 18]
@@ -2251,10 +2545,10 @@ class World:
             return
         self.dead += 1
         if cause == St.PLAGUE:
-            self.corpses.append([L.x, L.y, 0])
+            self.corpses.append([L.x, self.ry(L), 0])
         if "resurrect" in self.mods and not self.resurrected and self.soul is None and cause in (St.SPLAT, St.DROWN, St.BURN):
             y = L.y if cause != St.DROWN else L.y - 8
-            self.soul = [L.x, y, 12 * TPS, L.id]
+            self.soul = [L.x, y, 12 * TPS, L.id, L.inv]
         if "pairs" in self.mods and not L.child and cause != St.OHNO:
             mate = self.by_id.get(L.id ^ 1)
             # el oficio salva: un disciplinato ocupado no muere de pena
@@ -2266,11 +2560,11 @@ class World:
         r = BOMB_RADIUS
         self.terrain.erase(L.x - r, L.y - 6 - r, BOMB_MASK, 0)
         self.events.append("boom")
-        self.fx.append(("boom", L.x, L.y - 6))
+        self.emit(("boom", L.x, L.y - 6))
         # el bubón esparce la peste
         for o in self.lemmings:
             if o is not L and not o.removed and not o.immune and not o.child and o.moria == 0:
-                if (o.x - L.x) ** 2 + (o.y - L.y) ** 2 < 20 * 20 and self.rng.random() < 0.25:
+                if (o.x - L.x) ** 2 + (self.ry(o) - self.ry(L)) ** 2 < 20 * 20 and self.rng.random() < 0.25:
                     o.moria = 1
         self._kill(L, St.OHNO)
 
@@ -2282,7 +2576,7 @@ class World:
         L.moria_t += 2 if L.fervor > FERVOR_SLOW else 1
         if L.moria == 1 and L.moria_t > FEBBRE_TICKS:
             L.moria, L.moria_t = 2, 0
-            self.fx.append(("bubo", L.x, L.y - 6))
+            self.emit(("bubo", L.x, L.y - 6))
         elif L.moria == 2 and L.moria_t > BUBBONE_TICKS:
             L.bomb = None
             self._set(L, St.PLAGUE)
@@ -2296,7 +2590,7 @@ class World:
             r = 5 if L.moria == 1 else 12
             if L.state == St.BLOCK:
                 r *= 2
-            sources.append((L.x, L.y, r, (0.015 if L.moria == 1 else 0.03) * k, L.id))
+            sources.append((L.x, self.ry(L), r, (0.015 if L.moria == 1 else 0.03) * k, L.id))
         for fx, fy in self.focos:
             sources.append((fx, fy, 12, 0.05 * k, -1))
         for rx, ry, _ in self.rats:
@@ -2309,11 +2603,11 @@ class World:
             for sx, sy, r, p, sid in sources:
                 if "pairs_safe" in self.mods and sid >= 0 and sid ^ 1 == L.id:
                     continue
-                if (L.x - sx) ** 2 + (L.y - sy) ** 2 <= r * r:
+                if (L.x - sx) ** 2 + (self.ry(L) - sy) ** 2 <= r * r:
                     q = p * (1 + 0.5 * min(2.0, L.fervor / FERVOR_SLOW))
                     if self.rng.random() < q:
                         L.moria, L.moria_t = 1, 0
-                        self.fx.append(("infect", L.x, L.y - 8))
+                        self.fx.append(("infect", L.x, self.rmid(L) - 2))
                         break
 
     def _rats(self) -> None:
@@ -2348,20 +2642,20 @@ class World:
         if not self.vents and not self.boulders:
             return
         for L in self.lemmings:
-            if L.removed or L.state in DOOMED:
+            if L.removed or L.state in DOOMED or L.inv:
                 continue
             for v in self.vents:
                 if self.vent_on(v) and v[0] <= L.x <= v[1] and abs(L.y - v[2]) <= 2:
                     self._set(L, St.BURN)
                     self.events.append("burn")
-                    self.fx.append(("fire", L.x, L.y - 4))
+                    self.emit(("fire", L.x, L.y - 4))
                     break
             else:
                 for b in self.boulders:
                     if self.boulder_moving(b) and abs(L.x - b[3]) < 7 and b[2] - 16 <= L.y <= b[2] + 1:
                         self._set(L, St.SPLAT)
                         self.events.append("trap")
-                        self.fx.append(("blood", L.x, L.y))
+                        self.emit(("blood", L.x, L.y))
                         break
 
     def _guards(self) -> None:
@@ -2372,7 +2666,7 @@ class World:
             auto = GUARDS[g.kind][2]
             if not g.touched:
                 for L in self.lemmings:
-                    if not L.removed and abs(L.x - g.x) < 30 and abs(L.y - g.y) < 10:
+                    if not L.removed and L.inv == g.inv and abs(L.x - g.x) < 30 and abs(L.y - g.y) < 10:
                         g.touched = True
                         self.say(GUARDS[g.kind][3], g.name)
                         break
@@ -2391,7 +2685,7 @@ class World:
             c[2] += 1
             if c[2] == FOCO_TICKS:
                 self.focos.append((c[0], c[1]))
-                self.fx.append(("foco", c[0], c[1]))
+                self.emit(("foco", c[0], c[1]))
         self.corpses = [c for c in self.corpses if c[2] < FOCO_TICKS]
 
     def _souls(self) -> None:
@@ -2403,14 +2697,14 @@ class World:
             return
         sx, sy = self.soul[0], self.soul[1]
         for L in self.lemmings:
-            if not L.removed and L.state == St.WALK and abs(L.x - sx) < 8 and abs(L.y - sy) < 10:
+            if not L.removed and L.state == St.WALK and L.inv == self.soul[4] and abs(L.x - sx) < 8 and abs(L.y - sy) < 10:
                 nid = 20_000 + self.soul[3]
-                R = Lemming(nid, L.x, L.y, -L.dir, St.WALK)
+                R = Lemming(nid, L.x, L.y, -L.dir, St.WALK, inv=L.inv)
                 self._add(R)
                 self.dead -= 1
                 self.resurrected = True
                 self.soul = None
-                self.fx.append(("grace", L.x, L.y - 8))
+                self.fx.append(("grace", L.x, self.rmid(L)))
                 self.say("Filomena: «infortunio con final feliz». Un alma vuelve a la fila.", "Filomena")
                 break
 
@@ -2421,10 +2715,12 @@ class World:
         if L.y >= t.h + 8:
             self._kill(L, St.SPLAT)
             return
-        if L.y > self.fire_y:
+        if L.carry is not None:
+            return
+        if self.ry(L) > self.fire_y:
             self._set(L, St.BURN)
             self.events.append("burn")
-            self.fx.append(("fire", L.x, L.y - 4))
+            self.emit(("fire", L.x, L.y - 4))
             return
         hy = L.y - 1
         if 0 <= L.x < t.w and 0 <= hy < t.h and "nodeath" not in self.mods:
@@ -2433,17 +2729,27 @@ class World:
                 L.bomb = None
                 self._set(L, St.DROWN)
                 self.events.append("drown")
-                self.fx.append(("splash", L.x, L.y))
+                self.emit(("splash", L.x, L.y))
                 return
             if hz == HZ_FIRE or (hz == HZ_PURGE and L.state != St.WALK):
                 L.bomb = None
                 self._set(L, St.BURN)
                 self.events.append("burn")
-                self.fx.append(("fire", L.x, L.y - 4))
+                self.emit(("fire", L.x, L.y - 4))
+                return
+            if hz == HZ_FLIP and not L.inv:
+                # el centro de la Tierra: «io levai li occhi e credetti veder Lucifero com'io l'avea lasciato»
+                L.inv = True
+                L.y = VIEW_H - 1 - (L.y - 6)
+                self._set(L, St.FALL)
+                self.fx.append(("grace", L.x, VIEW_H - 1 - L.y))
+                if not self.flame_said:
+                    self.flame_said = True
+                    self.say("«Attienti ben, ché per cotali scale… conviensi dipartir da tanto male.» Ahora el suelo es el techo.", "Virgilio")
                 return
             if hz == HZ_PURGE:
                 if L.moria:
-                    self.fx.append(("cure", L.x, L.y - 6))
+                    self.emit(("cure", L.x, L.y - 6))
                 L.moria = L.moria_t = 0
                 L.fervor = 0
                 if not L.purified:
@@ -2453,13 +2759,30 @@ class World:
                         self.peso = max(0, self.peso - 10)
                         self.notes.append("Atravesó el muro de fuego: −10 de Peso")
                         self.say("Quien cruza el fuego entero sale limpio. Quien se para, arde.", "Virgilio")
+        if L.state == St.WALK and not L.inv:
+            for ax, ay in self.anteo:
+                if abs(L.x - ax) <= 2 and abs(L.y - ay) <= 2:
+                    dx = ax + 18 * L.dir
+                    dy = self._floor_at(min(max(dx, 0), self.tn.w - 1)) or L.y
+                    L.carry = [0, L.x, L.y, dx, dy]
+                    self.events.append("door")
+                    return
+            if self.trees and not L.stared:
+                for tx, _ in self.trees:
+                    if abs(L.x - tx) <= 1:
+                        L.stared = True
+                        L.stare = STARE_TICKS
+            for s in self.sabios:
+                if not s[4] and abs(L.x - s[0]) < 6:
+                    s[4] = True
+                    self.say(s[3], s[2])
         if L.state in EXITABLE:
             for e in self.exits:
-                if abs(L.x - e.x) <= 3 and e.y - 8 <= L.y <= e.y + 1:
+                if e.inv == L.inv and abs(L.x - e.x) <= 3 and e.y - 8 <= L.y <= e.y + 1:
                     L.bomb = None
                     self._set(L, St.EXIT)
                     return
-        if self.child is not None and not L.maestro and abs(L.x - self.child[0]) < 6 and abs(L.y - self.child[1]) < 8:
+        if self.child is not None and not L.maestro and not L.inv and abs(L.x - self.child[0]) < 6 and abs(L.y - self.child[1]) < 8:
             cx, cy = self.child
             self.child = None
             C = Lemming(30_000, cx, cy, L.dir, St.WALK, child=True, immune=10**9)
@@ -2474,19 +2797,115 @@ class World:
         if self.lume:
             lx, ly, _ = self.lume
             # haz diagonal de arriba-derecha a abajo-izquierda que pasa por (lx, ly)
-            d = abs((L.x - lx) + (L.y - ly)) / 1.4142
+            d = abs((L.x - lx) + (self.ry(L) - ly)) / 1.4142
             if d < 22:
                 L.fervor = 0
 
+    def _phantoms(self) -> None:
+        if not self.phantoms:
+            return
+        t = self.tn
+        for ph in self.phantoms:
+            x0, y0, x1, y1 = ph["r"]
+            if ph["kind"] == "blink":
+                want = (self.tick_count % (BLINK_ON + BLINK_OFF)) < BLINK_ON
+            else:
+                lit = False
+                if self.lume:
+                    lx, ly, _ = self.lume
+                    lit = abs(((x0 + x1) / 2 - lx) + ((y0 + y1) / 2 - ly)) / 1.4142 < 40
+                want = lit or self.reveal or self.dioneo > 0
+            if want == ph["on"]:
+                continue
+            ph["on"] = want
+            reg = t.k[y0:y1, x0:x1]
+            if want:
+                m = reg == AIR
+                reg[m] = DIRT
+                col = (200, 214, 240) if ph["kind"] == "blink" else (240, 220, 170)
+                t.c[y0:y1, x0:x1][m] = col
+                ph["mask"] = m
+            elif ph["mask"] is not None:
+                reg[ph["mask"] & (reg == DIRT)] = AIR
+            t._mark(x0, y0, x1, y1)
+
+    def _banner(self) -> None:
+        """Antinferno: los ignavos corren tras un estandarte que no va a ninguna parte."""
+        b = self.banner
+        if b is None:
+            return
+        b[2] -= 1
+        if b[2] <= 0:
+            self.banner = None
+            self.say("El estandarte se pierde en la niebla. Los ignavos se quedan sin nadie a quien seguir.", "Virgilio")
+            return
+        b[0] += 0.6 * b[1]
+        lo, hi = self.entrances[0].x + 40, self.tn.w * 0.55
+        if b[0] > hi or b[0] < lo:
+            b[1] = -b[1]
+
+    def _venus(self) -> None:
+        walkers = [L for L in self.lemmings if not L.removed and L.state == St.WALK]
+        buckets: dict[tuple[int, int], int] = {}
+        for L in walkers:
+            k = (L.x // 24, self.ry(L) // 24)
+            buckets[k] = buckets.get(k, 0) + 1
+        self.lonely = set()
+        for L in walkers:
+            bx, by = L.x // 24, self.ry(L) // 24
+            n = sum(buckets.get((bx + dx, by + dy), 0) for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+            if n <= 1:
+                self.lonely.add(L.id)
+
+    def _firerain(self) -> None:
+        """Inf. XIV: «piovean di foco dilatate falde». Lo que es sólido las apaga."""
+        if "firerain" not in self.mods:
+            return
+        t = self.tn
+        if self.rng.random() < 0.06 * t.w / VIEW_W:
+            self.drops.append([int(self.rng.integers(0, t.w)), 0])
+        alive = []
+        for d in self.drops:
+            hit = False
+            for _ in range(4):
+                d[1] += 1
+                if t.solid(d[0], d[1]):
+                    hit = True
+                    break
+            if hit:
+                if d[1] > 2:
+                    self.fx.append(("fire", d[0], d[1] - 2))
+                continue
+            for L in self.lemmings:
+                if (not L.removed and not L.inv and L.state not in DOOMED and abs(L.x - d[0]) <= 2
+                        and L.y - 12 <= d[1] <= L.y):
+                    L.bomb = None
+                    self._set(L, St.BURN)
+                    self.events.append("burn")
+                    self.fx.append(("fire", L.x, L.y - 4))
+                    hit = True
+                    break
+            if not hit and d[1] < t.h:
+                alive.append(d)
+        self.drops = alive
+
     def _pickups(self, L: Lemming) -> None:
         for p in self.pickups:
-            if p.taken or abs(L.x - p.x) > 5 or not (L.y - 14 <= p.y <= L.y + 2):
+            if p.taken or p.inv != L.inv or abs(L.x - p.x) > 5 or not (L.y - 14 <= p.y <= L.y + 2):
+                continue
+            if p.kind == "oficio":
+                p.taken = True
+                s = Skill(p.artist)
+                self.skills[s] += 1
+                self.emit(("pickup", p.x, p.y - 6, (190, 230, 190)))
+                self.events.append("pagina")
+                self.say(f"Neifile: «con ingenio». Un {SKILL_NAMES[s]} más escondido en el camino.", "Neifile")
                 continue
             if p.kind == "pagina":
                 p.taken = True
                 self.pagina = True
                 self.events.append("pagina")
-                self.fx.append(("pickup", p.x, p.y - 6, (250, 240, 200)))
+                self.emit(("pickup", p.x, p.y - 6, (250, 240, 200)))
                 self.say("Una pagina salvada de las llamas.", "")
                 continue
             if p.kind == "giunco":
@@ -2514,7 +2933,7 @@ class World:
             self.shield.append(p.kind)
             if p.kind == "mecenate":
                 self.art_queue.append(p.artist or "caravaggio")
-            self.fx.append(("pickup", p.x, p.y - 6, PALLE_INFO[p.kind][2]))
+            self.emit(("pickup", p.x, p.y - 6, PALLE_INFO[p.kind][2]))
             self.events.append("coin")
             if self.level.sky == "mercurio":
                 self.peso += 1
@@ -2984,6 +3403,15 @@ class Backdrop:
         haze.fill((255, 230, 220, 70))
         self.far.blit(haze, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
         self._mountains(self.mid, rng, VIEW_H * 0.82, 26, (150, 120, 120, 170), 0.5)
+        if self.sky == "superbi":  # Purg. X: los relieves de humildad tallados en la pared
+            for k in range(self.mid_w // 160):
+                x = 40 + k * 160
+                pygame.draw.rect(self.mid, (225, 215, 205, 220), (x, 70, 90, 56))
+                pygame.draw.rect(self.mid, (180, 170, 160, 220), (x, 70, 90, 56), 2)
+                for f in range(4):
+                    fx_ = x + 14 + f * 20
+                    pygame.draw.circle(self.mid, (170, 160, 150, 230), (fx_, 88), 4)
+                    pygame.draw.polygon(self.mid, (170, 160, 150, 230), [(fx_ - 5, 120), (fx_ + 5, 120), (fx_ + 2, 93), (fx_ - 2, 93)])
 
     def _paint_eden(self, rng):
         self._paint_purgatorio(rng)
@@ -3022,6 +3450,49 @@ class Backdrop:
                 x, y = rng.randrange(self.mid_w), rng.randint(20, VIEW_H - 40)
                 for k in range(5):
                     pygame.draw.circle(self.mid, (255, 255, 255, 50), (x + k * 9, y + rng.randint(-4, 4)), rng.randint(8, 14))
+
+    def overlay(self, view: pygame.Surface, cam: int, frame: int) -> None:
+        """Lo que se mueve en el fondo: coronas, cruz, águila, escala, luna."""
+        sky = self.sky
+        if not sky:
+            return
+        cx = VIEW_W // 2 - int(cam * 0.1)
+        if sky == "sole":  # dos coronas de doce espíritus que giran en sentidos opuestos
+            for ring, (r, sp) in enumerate(((70, 0.006), (100, -0.004))):
+                for k in range(12):
+                    a = k / 12 * math.tau + frame * sp
+                    x, y = cx + r * math.cos(a), 120 + r * 0.45 * math.sin(a)
+                    pygame.draw.circle(view, (255, 250, 200), (int(x), int(y)), 3 - ring)
+        elif sky == "marte":  # la cruz de luz
+            g = 180 + int(40 * math.sin(frame * 0.03))
+            pygame.draw.rect(view, (255, g, g - 60), (cx - 4, 20, 8, 200))
+            pygame.draw.rect(view, (255, g, g - 60), (cx - 70, 80, 140, 8))
+        elif sky == "giove":  # DILIGITE IUSTITIAM… y el águila de luces
+            if not hasattr(self, "_font"):
+                self._font = pygame.font.Font(None, 22)
+                self._words = self._font.render("DILIGITE IUSTITIAM QUI IUDICATIS TERRAM", True, (255, 250, 230))
+            ww = self._words.get_width()
+            view.blit(self._words, (cx - ww // 2, 24))
+            for k in range(40):
+                t = k / 40
+                wing = math.sin(t * math.pi) * (40 + 10 * math.sin(frame * 0.05))
+                for s_ in (-1, 1):
+                    view.fill((255, 240, 180), (int(cx + s_ * t * 90), int(100 - wing * 0.6 + t * 30), 2, 2))
+        elif sky == "saturno":  # la escala de oro que sube más allá de la vista
+            for k in range(0, VIEW_H, 9):
+                y = (k + frame // 3) % VIEW_H
+                pygame.draw.line(view, (240, 210, 120), (cx - 14, y), (cx + 14, y), 1)
+            pygame.draw.line(view, (240, 210, 120), (cx - 14, 0), (cx - 14, VIEW_H), 1)
+            pygame.draw.line(view, (240, 210, 120), (cx + 14, 0), (cx + 14, VIEW_H), 1)
+        elif sky == "luna":
+            pygame.draw.circle(view, (236, 240, 250), (cx + 160, 70), 30)
+            pygame.draw.circle(view, (210, 216, 232), (cx + 150, 62), 6)
+            pygame.draw.circle(view, (210, 216, 232), (cx + 172, 82), 4)
+        elif sky == "venere":
+            for k in range(8):
+                a = frame * 0.01 + k
+                x, y = int(cx + 120 * math.cos(a)), int(110 + 40 * math.sin(a * 1.3))
+                pygame.draw.polygon(view, (255, 160, 190), [(x, y + 3), (x - 3, y - 1), (x - 1, y - 3), (x, y - 1), (x + 1, y - 3), (x + 3, y - 1)])
 
     # ── dibujo ──────────────────────────────────────────────────────────
     def draw(self, view: pygame.Surface, cam: int, night: float) -> None:
@@ -3207,6 +3678,8 @@ class Renderer:
         self.fx = FX()
         self.light = pygame.Surface((VIEW_W // 2, VIEW_H // 2))
         self.glow = pygame.Surface((VIEW_W // 4, VIEW_H // 4))
+        self.inv_layer = pygame.Surface((VIEW_W, VIEW_H), pygame.SRCALPHA)
+        self.inv_glow = pygame.Surface((VIEW_W // 4, VIEW_H // 4))
         self.vignette = self._vignette()
         self.grain = [self._grain(k) for k in range(4)]
         self._hazard_layers()
@@ -3257,6 +3730,16 @@ class Renderer:
         self.hz_glow = pygame.Surface((self.world.terrain.w // 4 + 1, VIEW_H // 4 + 1))
         liq = hz == HZ_LIQUID
         fire = (hz == HZ_FIRE) | (hz == HZ_PURGE)
+        flip = hz == HZ_FLIP
+        self.flipfx: list[pygame.Surface] = []
+        if flip.any():
+            h_, w_ = hz.shape
+            yy, xx = np.mgrid[0:h_, 0:w_]
+            for k in range(6):
+                v = 0.5 + 0.5 * np.sin(yy * 0.35 + xx * 0.9 + k * 1.05)
+                col = np.stack([120 + 120 * v, 90 + 90 * v, 200 + 55 * v], axis=-1)
+                self.flipfx.append(_overlay(flip, col.astype(np.uint8), 90))
+            self._glow_mask(flip, (90, 60, 160))
         h, w = hz.shape
         if liq.any():
             top = liq.copy()
@@ -3369,6 +3852,7 @@ class Renderer:
                 flick = 0.8 + 0.2 * math.sin(frame * 0.07 + gx)
                 view.blit(light_sprite(gr, tuple(int(c * 0.45 * flick) for c in gc), 2.4), (x - gr, gy - gr),
                           special_flags=pygame.BLEND_ADD)
+        self.back.overlay(view, cam, frame)
         # 2) terreno
         view.blit(self.tsurf, (0, 0), pygame.Rect(cam, 0, VIEW_W, VIEW_H))
         if w.theme.veins is not None:
@@ -3382,11 +3866,21 @@ class Renderer:
             view.blit(self.liquid[(frame // 10) % len(self.liquid)], (0, 0), pygame.Rect(cam, 0, VIEW_W, VIEW_H))
         if self.fire:
             view.blit(self.fire[(frame // 4) % len(self.fire)], (0, 0), pygame.Rect(cam, 0, VIEW_W, VIEW_H))
-        if self.liquid or self.fire:
+        if self.flipfx:
+            view.blit(self.flipfx[(frame // 5) % len(self.flipfx)], (0, 0), pygame.Rect(cam, 0, VIEW_W, VIEW_H))
+        if self.liquid or self.fire or self.flipfx:
             glow.blit(self.hz_glow, (-cam // 4, 0), special_flags=pygame.BLEND_ADD)
         # 4) entidades
         lights: list[tuple[int, int, int, tuple[int, int, int]]] = []
         self._entities(view, glow, cam, frame, lights)
+        if w.has_inv:
+            lay, g2, l2 = self.inv_layer, self.inv_glow, []
+            lay.fill((0, 0, 0, 0))
+            g2.fill((0, 0, 0))
+            self._entities(lay, g2, cam, frame, l2, inv=True)
+            view.blit(pygame.transform.flip(lay, False, True), (0, 0))
+            glow.blit(pygame.transform.flip(g2, False, True), (0, 0), special_flags=pygame.BLEND_ADD)
+            lights += [(x, VIEW_H - 1 - y, r, c) for x, y, r, c in l2]
         # 5) partículas
         self.fx.draw(view, glow, cam)
         self.atmo.draw(view, glow, 0)
@@ -3432,7 +3926,7 @@ class Renderer:
                 flick = 1 + 0.12 * math.sin(frame * 0.4 + Lm.id)
                 r = int((40 if dark else 36) * flick)
                 col = (150, 110, 60) if not Lm.maestro else (110, 70, 50)
-                L.blit(light_sprite(r // 2, col), ((Lm.x - cam) // 2 - r // 2, (Lm.y - 6) // 2 - r // 2),
+                L.blit(light_sprite(r // 2, col), ((Lm.x - cam) // 2 - r // 2, w.rmid(Lm) // 2 - r // 2),
                        special_flags=pygame.BLEND_ADD)
         for gx, gy, gr, gc in self.back.glows:
             x = gx - int(cam * 0.25)
@@ -3461,15 +3955,81 @@ class Renderer:
         pygame.draw.polygon(beam, (int(255 * a), int(230 * a), int(180 * a)), poly)
         L.blit(beam, (0, 0), special_flags=pygame.BLEND_ADD)
 
-    def _entities(self, view, glow, cam, frame, lights) -> None:
+    def _entities(self, view, glow, cam, frame, lights, inv: bool = False) -> None:
+        """Dibuja las entidades de un marco: el del mundo o el de quien cae hacia la luz."""
         w = self.world
         tick = w.tick_count
         for e in w.entrances:
+            if e.inv != inv:
+                continue
             self._font(view, e.x - cam, e.y, min(1.0, w.hatch / HATCH_TICKS), frame)
             lights.append((e.x, e.y - 14, 70, (120, 110, 150)))
         for ex in w.exits:
+            if ex.inv != inv:
+                continue
             self._exit(view, glow, ex.x - cam, ex.y, frame, w.cantica, w.level.special)
             lights.append((ex.x, ex.y - 14, 120, (255, 200, 120) if w.cantica != "paradiso" else (255, 255, 230)))
+        if not inv:
+            self._world_things(view, glow, cam, frame, lights)
+        for g in w.guards:
+            if g.inv == inv:
+                self._guard(view, glow, g, cam, frame, lights)
+        for p in w.pickups:
+            if not p.taken and p.inv == inv:
+                self._pickup(view, glow, p, cam, frame, lights)
+        backwards = w.rule_off("backwards")
+        stones = 0
+        if w.cantica == "purgatorio" and w.peso >= 10:
+            stones = max(1, w.total // max(1, w.peso // 10))
+        for Lm in w.lemmings:
+            if Lm.removed or Lm.inv != inv:
+                continue
+            name, i, dy = sprite_of(Lm, tick)
+            who = "m" if Lm.maestro else "c" if Lm.child else "w"
+            d = -Lm.dir if backwards and Lm.state == St.WALK else Lm.dir
+            img = self.sp.get(name, i, d, who)
+            if Lm.moria == 1:
+                img = self.sp.tinted(img, (236, 230, 170))
+            elif Lm.moria == 2:
+                img = self.sp.tinted(img, (190, 210, 120))
+            if Lm.state == St.BURN:
+                img = self.sp.tinted(img, (255, 150, 60))
+            ax = img.get_width() // 2 - (0 if d > 0 else 1)
+            x, y = Lm.x - ax - cam, Lm.y - img.get_height() + 1 + dy
+            if Lm.state == St.EXIT:
+                img = img.copy()
+                img.set_alpha(255 - 20 * Lm.frame)
+            view.blit(img, (x, y))
+            if Lm.moria == 2:
+                view.fill((60, 120, 20), (Lm.x - cam + (2 if d > 0 else -3), Lm.y - 7, 2, 2))
+            if Lm.bomb is not None:
+                dd = str(min(5, math.ceil(Lm.bomb / TPS)))
+                view.blit(self.sp.digits[dd], (Lm.x - 1 - cam, Lm.y - 19))
+            if Lm.state == St.BUILD and Lm.bricks <= 3 and frame % 16 < 8:
+                view.fill((255, 225, 40), (Lm.x - cam, Lm.y - 16, 1, 2))
+            if Lm.state == St.BLOCK and frame % 20 < 3:
+                self.fx.burst(Lm.x + 4 * (1 if frame % 40 < 20 else -1), Lm.y - 7, 2, [(200, 20, 20)], 0.6, (6, 12), 0.2, False, 0.2)
+            if Lm.maestro:
+                lights.append((Lm.x, Lm.y - 8, 30, (140, 90, 40)))
+                if w.flame_said:
+                    view.fill((255, 140, 40), (Lm.x - cam, Lm.y - 15 - (frame // 3) % 3, 1, 2))
+            if Lm.grace:
+                view.fill((80, 110, 255), (Lm.x - cam, Lm.y - 15, 1, 1))
+            if w.lume and Lm.fervor == 0 and Lm.state == St.WALK:
+                glow.fill((40, 36, 20), ((Lm.x - cam) // 4, (Lm.y - 8) // 4, 1, 1), special_flags=pygame.BLEND_ADD)
+            if stones and Lm.id % stones == 0 and not Lm.maestro:  # el Peso hecho piedra
+                pygame.draw.circle(view, (120, 116, 110), (Lm.x - cam - 2 * d, Lm.y - 10), 3)
+                view.fill((170, 166, 160), (Lm.x - cam - 2 * d - 1, Lm.y - 12, 2, 1))
+            if "paradiso" in w.mods and Lm.fervor > FERVOR_SLOW and (tick + Lm.id) % 80 < 24:
+                k = (frame // 2) % 4
+                view.fill((255, 255, 255), (Lm.x - cam - 1 + k % 3, Lm.y - 16 - k // 2, 1, 1))  # deslumbrado
+            if Lm.stare:
+                view.fill((230, 60, 40), (Lm.x - cam + 2 * d, Lm.y - 15, 1, 1))
+
+
+    def _world_things(self, view, glow, cam, frame, lights) -> None:
+        """Lo que solo existe en el marco del mundo: peligros, trampas, gigantes, árboles."""
+        w = self.world
         for v in w.vents:
             on = w.vent_on(v)
             x0 = v[0] - cam
@@ -3527,53 +4087,70 @@ class Renderer:
             lights.append((w.soul[0], sy - 8, 40, (120, 120, 200)))
         if w.level.special == "caravaggio":
             self._caravaggio(view, glow, cam, frame, lights)
-        for g in w.guards:
-            self._guard(view, glow, g, cam, frame, lights)
-        for p in w.pickups:
-            if not p.taken:
-                self._pickup(view, glow, p, cam, frame, lights)
         if w.lure:
             x, y = w.lure[0] - cam, w.lure[1]
             pygame.draw.circle(view, (255, 140, 30), (x, y - 3), 3)
             view.fill((60, 120, 40), (x, y - 7, 2, 2))
             lights.append((w.lure[0], y, 50, (255, 140, 40)))
-        backwards = w.rule_off("backwards")
-        for Lm in w.lemmings:
-            if Lm.removed:
-                continue
-            name, i, dy = sprite_of(Lm, tick)
-            who = "m" if Lm.maestro else "c" if Lm.child else "w"
-            d = -Lm.dir if backwards and Lm.state == St.WALK else Lm.dir
-            img = self.sp.get(name, i, d, who)
-            if Lm.moria == 1:
-                img = self.sp.tinted(img, (236, 230, 170))
-            elif Lm.moria == 2:
-                img = self.sp.tinted(img, (190, 210, 120))
-            if Lm.state == St.BURN:
-                img = self.sp.tinted(img, (255, 150, 60))
-            ax = img.get_width() // 2 - (0 if d > 0 else 1)
-            x, y = Lm.x - ax - cam, Lm.y - img.get_height() + 1 + dy
-            if Lm.state == St.EXIT:
-                img = img.copy()
-                img.set_alpha(255 - 20 * Lm.frame)
-            view.blit(img, (x, y))
-            if Lm.moria == 2:
-                view.fill((60, 120, 20), (Lm.x - cam + (2 if d > 0 else -3), Lm.y - 7, 2, 2))
-            if Lm.bomb is not None:
-                dd = str(min(5, math.ceil(Lm.bomb / TPS)))
-                view.blit(self.sp.digits[dd], (Lm.x - 1 - cam, Lm.y - 19))
-            if Lm.state == St.BUILD and Lm.bricks <= 3 and frame % 16 < 8:
-                view.fill((255, 225, 40), (Lm.x - cam, Lm.y - 16, 1, 2))
-            if Lm.state == St.BLOCK and frame % 20 < 3:
-                self.fx.burst(Lm.x + 4 * (1 if frame % 40 < 20 else -1), Lm.y - 7, 2, [(200, 20, 20)], 0.6, (6, 12), 0.2, False, 0.2)
-            if Lm.maestro:
-                lights.append((Lm.x, Lm.y - 8, 30, (140, 90, 40)))
-                if w.flame_said:
-                    view.fill((255, 140, 40), (Lm.x - cam, Lm.y - 15 - (frame // 3) % 3, 1, 2))
-            if Lm.grace:
-                view.fill((80, 110, 255), (Lm.x - cam, Lm.y - 15, 1, 1))
-            if w.lume and Lm.fervor == 0 and Lm.state == St.WALK:
-                glow.fill((40, 36, 20), ((Lm.x - cam) // 4, (Lm.y - 8) // 4, 1, 1), special_flags=pygame.BLEND_ADD)
+        for d_ in w.drops:  # lluvia de fuego
+            x, y = d_[0] - cam, d_[1]
+            if -2 < x < VIEW_W + 2:
+                pygame.draw.line(view, (255, 200, 90), (x, y), (x + 1, y - 5))
+                view.fill((255, 250, 210), (x, y, 1, 1))
+                glow.fill((90, 40, 8), (x // 4, y // 4, 1, 2), special_flags=pygame.BLEND_ADD)
+        if w.banner:
+            bx = int(w.banner[0])
+            by = w._floor_at(min(max(bx, 0), w.tn.w - 1)) or VIEW_H - 20
+            x = bx - cam
+            pygame.draw.line(view, (120, 100, 80), (x, by - 34), (x, by - 2), 1)
+            for k in range(10):
+                wave = int(2 * math.sin(frame * 0.25 + k * 0.7))
+                view.fill((230, 220, 200) if k % 4 else (200, 40, 30), (x + 1 + k, by - 34 + wave, 1, 7))
+            for k in range(7):  # avispas y tábanos
+                a = frame * 0.2 + k * 0.9
+                view.fill((240, 200, 60), (x + int(18 * math.cos(a * (1 + k % 3 * 0.3))), by - 24 + int(10 * math.sin(a * 1.7)), 1, 1))
+            lights.append((bx, by - 28, 50, (200, 180, 140)))
+        for tx, ty in w.trees:  # Purg. XXII: el árbol de fruta y el agua que cae
+            x = tx - cam
+            pygame.draw.line(view, (90, 66, 40), (x, ty), (x, ty - 28), 3)
+            pygame.draw.polygon(view, (60, 120, 50), [(x - 16, ty - 26), (x + 16, ty - 26), (x + 8, ty - 44), (x - 8, ty - 44)])
+            for k in range(6):
+                view.fill((230, 50, 40), (x - 12 + k * 5, ty - 30 - (k % 2) * 8, 2, 2))
+            for k in range(4):
+                yy = ty - 50 + (frame // 2 + k * 6) % 26
+                view.fill((150, 200, 255), (x + 14, yy, 1, 2))
+        for sx_, sy_, nm, _line, _said in w.sabios:  # los sabios del castillo
+            x = sx_ - cam
+            pygame.draw.polygon(view, (200, 196, 180), [(x - 4, sy_), (x + 4, sy_), (x + 2, sy_ - 11), (x - 2, sy_ - 11)])
+            pygame.draw.circle(view, (220, 190, 160), (x, sy_ - 13), 2)
+            pygame.draw.arc(view, (90, 160, 70), (x - 3, sy_ - 17, 6, 5), 0, math.pi, 1)
+            lights.append((sx_, sy_ - 10, 40, (160, 160, 130)))
+        for ax_, ay_ in w.anteo:  # el gigante, desde el fondo del pozo
+            base = w._floor_at(min(ax_ + 18, w.tn.w - 1)) or VIEW_H - 8
+            x = ax_ - cam + 22
+            body = (88, 74, 70)
+            pygame.draw.rect(view, body, (x - 8, ay_ + 6, 16, base - ay_ - 6))
+            pygame.draw.circle(view, (120, 100, 90), (x, ay_), 7)
+            view.fill((255, 80, 40), (x - 3, ay_ - 1, 2, 1))
+            view.fill((255, 80, 40), (x + 2, ay_ - 1, 2, 1))
+            reach = int(2 * math.sin(frame * 0.05))
+            pygame.draw.line(view, body, (x - 6, ay_ + 10), (ax_ - cam + 2, ay_ + 2 + reach), 4)
+            pygame.draw.circle(view, (120, 100, 90), (ax_ - cam + 2, ay_ + 1 + reach), 3)
+            lights.append((ax_ + 22, ay_ + 20, 70, (180, 120, 90)))
+        for ph in w.phantoms:
+            x0, y0, x1, y1 = ph["r"]
+            if ph["on"]:
+                glow.fill((40, 40, 50), ((x0 - cam) // 4, y0 // 4, (x1 - x0) // 4 + 1, 1), special_flags=pygame.BLEND_ADD)
+            elif frame % 40 < 30:
+                for xx in range(x0, x1, 3):
+                    view.fill((150, 150, 170), (xx - cam, y0, 1, 1))
+        if w.level.id == 6:  # Paolo e Francesca, «che 'nsieme vanno»
+            for k in range(2):
+                fx_ = (frame * 1.3 + k * 9) % (VIEW_W + 80) - 40
+                fy_ = 60 + 18 * math.sin(frame * 0.02 + k * 0.4) + k * 6
+                pygame.draw.polygon(view, (236, 200, 210), [(fx_, fy_), (fx_ - 9, fy_ - 2), (fx_ - 6, fy_ + 3)])
+                pygame.draw.circle(view, (240, 210, 190), (int(fx_ + 1), int(fy_ - 1)), 2)
+                lights.append((int(fx_) + cam, int(fy_), 40, (200, 140, 170)))
 
     # ── piezas ──────────────────────────────────────────────────────────
     def _font(self, view, x, y, opened, frame) -> None:
@@ -3630,6 +4207,13 @@ class Renderer:
                 view.fill((120, 90, 60), (x - 2, y - 1 + k * 2, 5, 1))
             glow.fill((50, 46, 30), (x // 4, y // 4, 2, 2), special_flags=pygame.BLEND_ADD)
             lights.append((p.x, y, 30, (120, 110, 80)))
+            return
+        if p.kind == "oficio":  # el oficio escondido de Neifile: un rollo con cinta verde
+            pygame.draw.rect(view, (226, 210, 170), (x - 4, y - 2, 9, 5))
+            pygame.draw.circle(view, (200, 184, 140), (x - 4, y), 2)
+            pygame.draw.circle(view, (200, 184, 140), (x + 5, y), 2)
+            view.fill((60, 170, 80), (x, y - 2, 1, 5))
+            glow.fill((20, 40, 20), (x // 4, y // 4, 1, 1), special_flags=pygame.BLEND_ADD)
             return
         if p.kind == "giunco":
             for k in range(4):
@@ -3812,7 +4396,7 @@ def _voice(freq: float, dur: float, vowel: str = "a", vib: float = 0.006) -> np.
     t = np.arange(n) / SR
     f = freq * (1 + vib * np.sin(math.tau * 5.2 * t + freq))
     phase = np.cumsum(f) / SR
-    formants = {"a": (750, 1150), "o": (480, 850), "u": (330, 700), "e": (500, 1700)}[vowel]
+    formants = {"a": (750, 1150), "o": (480, 850), "u": (330, 700), "e": (500, 1700), "i": (300, 2300)}[vowel]
     out = np.zeros(n)
     for h in range(1, 14):
         fh = freq * h
@@ -3944,9 +4528,21 @@ def compose(style: str) -> np.ndarray:
     return np.zeros(int(SR * 2))
 
 
+VOICE_PITCH = {
+    "Virgilio": 108, "Il Maestro": 92, "Beatrice": 236, "San Bernardo": 118, "Savonarola": 128, "Matelda": 246,
+    "Brunelleschi": 132, "Botticelli": 142, "Caravaggio": 116, "Dioneo": 152, "Filostrato": 128, "Panfilo": 138,
+    "Pier della Vigna": 100, "L'Angelo": 300, "Caronte": 76, "Cerbero": 64, "Pluto": 70, "Minosse": 72,
+}
+_VOWEL = str.maketrans("àáèéìíòóùú", "aaeeiioouu")
+
+
 class Sfx:
     def __init__(self, enabled: bool):
         self.ok = False
+        self.voices = True
+        self.vol = 0.8
+        self.vch: pygame.mixer.Channel | None = None
+        self._said: dict[tuple[str, str], pygame.mixer.Sound] = {}
         self.music_on = enabled
         self.sounds: dict[str, pygame.mixer.Sound] = {}
         self.tracks: dict[str, pygame.mixer.Sound] = {}
@@ -3999,7 +4595,41 @@ class Sfx:
 
     def play(self, name: str) -> None:
         if self.ok and name in self.sounds:
-            self.sounds[name].play()
+            ch = self.sounds[name].play()
+            if ch:
+                ch.set_volume(self.vol)
+
+    def speak(self, who: str, text: str) -> None:
+        """Un «italiano del Trecento» sin palabras: sílabas formánticas con la voz de cada cual."""
+        if not self.ok or not self.voices:
+            return
+        key = (who, text[:48])
+        snd = self._said.get(key)
+        if snd is None:
+            f0 = VOICE_PITCH.get(who, 210 + (sum(map(ord, who)) % 5) * 12 if who else 160)
+            vowels = [c for c in text.lower().translate(_VOWEL) if c in "aeiou"][:18]
+            parts = []
+            for k, v in enumerate(vowels):
+                f = f0 * (1 + 0.07 * math.sin(k * 1.7)) * (0.94 if k == len(vowels) - 1 else 1)
+                parts.append(_voice(f, 0.09, v, 0.012))
+                parts.append(np.zeros(int(SR * 0.018)))
+            if not parts:
+                return
+            sig = np.concatenate(parts) * 0.5
+            snd = self._make(sig)
+            if len(self._said) > 64:
+                self._said.clear()
+            self._said[key] = snd
+        if self.vch:
+            self.vch.stop()
+        self.vch = snd.play()
+        if self.vch:
+            self.vch.set_volume(self.vol * 0.9)
+
+    def set_volume(self, v: float) -> None:
+        self.vol = max(0.0, min(1.0, v))
+        if self.channel:
+            self.channel.set_volume(self.vol)
 
     def music(self, style: str | None) -> None:
         if not self.ok:
@@ -4018,6 +4648,8 @@ class Sfx:
         if self.channel:
             self.channel.fadeout(500)
         self.channel = self.tracks[style].play(-1, fade_ms=900)
+        if self.channel:
+            self.channel.set_volume(self.vol)
         self.current = style
 
     def toggle(self, style: str | None) -> None:
@@ -4096,6 +4728,13 @@ CODEX = [
     ("El Maestro cierra la fila", "El diseño lo quería primero; aquí sale el último para que protegerlo sea posible.", "licencia"),
     ("Mezcla de épocas", "1300, 1348, s. XV, 1571–1610: el más allá dantesco está fuera del tiempo.", "licencia"),
     ("Las bolge de Malebolge", "Los falsos consejeros son la 8.ª bolgia: aquí, el nivel 29.", "dato"),
+    ("Lucifer y el centro de la Tierra", "Dante y Virgilio bajan por el pelo de Lucifer y, al pasar el centro, se dan la vuelta (Inf. XXXIV).", "dato"),
+    ("Anteo", "El gigante, sin cadenas, baja a los dos poetas al fondo del pozo (Inf. XXXI).", "dato"),
+    ("La lluvia de fuego", "«Sovra tutto 'l sabbion, d'un cader lento, / piovean di foco dilatate falde» (Inf. XIV).", "dato"),
+    ("La cúpula como paraguas", "Brunelleschi no protegió a nadie del fuego: usamos su doble casco como cobijo.", "licencia"),
+    ("Gravedad hacia la luz", "En el Paraíso no hay suelo: la Compagnia cae hacia arriba. Es nuestra lectura de Par. I.", "tesis nuestra"),
+    ("Las siete P", "El Ángel graba siete P en la frente de Dante; cada cornisa borra una (Purg. IX).", "dato"),
+    ("Las voces", "Sílabas formánticas sintéticas: suenan a italiano pero no dicen nada. Los subtítulos sí.", "licencia"),
 ]
 
 BRIGATA = {
@@ -4154,6 +4793,13 @@ ENDINGS = {
                 "La procesión vuelve a empezar. Dies irae, dies illa."]),
 }
 
+SAVONAROLA = [
+    "¡Arrojad al fuego los espejos, los naipes, los afeites!",
+    "Florencia, haz penitencia mientras aún arde la hoguera.",
+    "Los libros vanos, al fuego; las almas, al cielo.",
+    "No es la llama la que quema: es la vanidad que lleváis encima.",
+]
+
 MOD_TEXT = {
     "wind": "La bufera: el viento arrastra a quien cae o planea.",
     "night": "De noche no se sube (Purg. VII): al caer el sol, la Compagnia se detiene.",
@@ -4169,7 +4815,14 @@ MOD_TEXT = {
     "silence": "Saturno: silencio total.",
     "paradiso": "En el Paraíso el Flagellante ya no bloquea: solo se queda inmóvil.",
     "firerain": "Lluvia de fuego sobre el arenal.",
-    "trees": "Árboles con fruta inalcanzable.",
+    "trees": "Árboles con fruta inalcanzable: quien pasa se queda mirando.",
+    "lux": "Gravedad hacia la luz: aquí se cae hacia arriba.",
+    "blink": "Plataformas que aparecen y desaparecen, como las promesas.",
+    "ghost": "Cornisas ocultas: solo el Lume, Botticelli o Dioneo las hacen aparecer.",
+    "venus": "Venus: el alma que camina sola va más despacio; la horda tiende a agruparse.",
+    "banner": "Los ignavos corren tras un estandarte. La Compagnia lo sigue si no la paras.",
+    "ice": "El hielo del Cocito: no hay manera de pararse del todo.",
+    "suicidi": "Bosque de los suicidas: cada excavación sangra (+1 de Peso).",
 }
 
 
@@ -4214,6 +4867,13 @@ class Save:
     @property
     def unlocked(self) -> int:
         return int(self.data.get("unlocked", 0))
+
+    @property
+    def opts(self) -> dict:
+        o = self.data.setdefault("opts", {})
+        for k, v in {"music": True, "voices": True, "quality": 2, "volume": 8, "fullscreen": False}.items():
+            o.setdefault(k, v)
+        return o
 
     def camp_for(self, i: int) -> Campaign:
         lv = self.data["levels"]
@@ -4279,6 +4939,7 @@ class PlayState:
     demo: bool = False
     nuke_hold: int = 0
     nuke_armed: int = 0
+    msg_seen: int = 0
     rr_hold: int = 0
     hold_t: int = 0
     end_wait: float = 0.0
@@ -4343,7 +5004,8 @@ class App:
             fit = max(1, min(info.current_w // LW, (info.current_h - 60) // LH))
             s = fit if not s else min(s, fit)
         self.s = max(1, s or 2)
-        self.fullscreen = args.fullscreen
+        self.save = Save()
+        self.fullscreen = args.fullscreen or self.save.opts["fullscreen"]
         self._make_window()
         pygame.display.set_caption(TITLE)
         self.clock = pygame.time.Clock()
@@ -4351,8 +5013,27 @@ class App:
         self._fonts()
         self.sprites = Sprites()
         self.sfx = Sfx(not args.mute)
-        self.quality = 0 if args.lowfx else 2
-        self.save = Save()
+        o = self.save.opts
+        self.sfx.music_on = self.sfx.music_on and o["music"]
+        self.sfx.voices = o["voices"]
+        self.sfx.set_volume(o["volume"] / 10)
+        self.quality = 0 if args.lowfx else int(o["quality"])
+        self.opt_sel = 0
+        # mando: cursor virtual y ejes
+        self.pads: list = []
+        self.pad_active = False
+        self.vcur = [VIEW_W / 2, VIEW_H / 2]
+        self.pad_axes = {"lx": 0.0, "ly": 0.0, "rx": 0.0, "lt": 0.0, "rt": 0.0}
+        self.pad_held: set[int] = set()
+        self.pad_combo = 0
+        try:
+            from pygame._sdl2 import controller as sdlc
+
+            sdlc.init()
+            self._sdlc = sdlc
+            self.pads = [sdlc.Controller(i) for i in range(sdlc.get_count()) if sdlc.is_controller(i)]
+        except (ImportError, pygame.error, AttributeError):
+            self._sdlc = None
         self.unlocked = N_LEVELS - 1 if args.all else min(self.save.unlocked, N_LEVELS - 1)
         self.sel = self.unlocked
         self.mode = "title"
@@ -4544,6 +5225,13 @@ class App:
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
                     return
+                if ev.type in PAD_EVENTS:
+                    for ev2 in self.pad_event(ev):
+                        if getattr(self, f"on_{self.mode}")(ev2) == "quit":
+                            return
+                    continue
+                if ev.type == pygame.MOUSEMOTION:
+                    self.pad_active = False
                 if ev.type == pygame.KEYDOWN and ev.key == pygame.K_m and self.mode != "play" or (
                         ev.type == pygame.KEYDOWN and ev.key == pygame.K_m and pygame.key.get_mods() & pygame.KMOD_CTRL):
                     self.sfx.toggle(self.sfx.current or "inferno")
@@ -4561,7 +5249,7 @@ class App:
             pygame.display.flip()
 
     # ── título ───────────────────────────────────────────────────────────
-    MENU = ["Comenzar el viaje", "La Commedia (mapa)", "Pagine salvate", "Códice histórico", "Salir"]
+    MENU = ["Comenzar el viaje", "La Commedia (mapa)", "Pagine salvate", "Códice histórico", "Opciones", "Salir"]
 
     def on_title(self, ev):
         if ev.type == pygame.KEYDOWN:
@@ -4600,8 +5288,171 @@ class App:
                 self.scroll = 0
                 self.mode = "codex"
             case 4:
+                self.opt_sel = 0
+                self.mode = "options"
+            case 5:
                 return "quit"
         return None
+
+    # ── opciones ─────────────────────────────────────────────────────────
+    OPTS = ["music", "voices", "quality", "volume", "fullscreen", "back"]
+
+    def on_options(self, ev):
+        if ev.type != pygame.KEYDOWN and not (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1):
+            return None
+        o = self.save.opts
+        key = getattr(ev, "key", pygame.K_RETURN)
+        if ev.type == pygame.MOUSEBUTTONDOWN:
+            k = int((ev.pos[1] / self.s - 120) // 22)
+            if 0 <= k < len(self.OPTS):
+                self.opt_sel = k
+        if key == pygame.K_ESCAPE:
+            self.mode = "title"
+            return None
+        if key in (pygame.K_UP, pygame.K_w):
+            self.opt_sel = (self.opt_sel - 1) % len(self.OPTS)
+            return None
+        if key in (pygame.K_DOWN, pygame.K_s):
+            self.opt_sel = (self.opt_sel + 1) % len(self.OPTS)
+            return None
+        item = self.OPTS[self.opt_sel]
+        delta = -1 if key in (pygame.K_LEFT, pygame.K_a) else 1
+        if key not in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_a, pygame.K_d, pygame.K_RETURN, pygame.K_SPACE):
+            return None
+        match item:
+            case "music":
+                o["music"] = not o["music"]
+                self.sfx.toggle(self.sfx.current or "inferno")
+            case "voices":
+                o["voices"] = self.sfx.voices = not o["voices"]
+                self.sfx.speak("Virgilio", "Or va, ch'un sol volere è d'ambedue")
+            case "quality":
+                o["quality"] = self.quality = 0 if self.quality else 2
+            case "volume":
+                o["volume"] = max(0, min(10, o["volume"] + delta))
+                self.sfx.set_volume(o["volume"] / 10)
+                self.sfx.play("assign")
+            case "fullscreen":
+                o["fullscreen"] = self.fullscreen = not self.fullscreen
+                self._make_window()
+            case "back":
+                self.mode = "title"
+        self.save.write()
+        return None
+
+    def draw_options(self) -> None:
+        self.title_scene.draw(self.view, self.frame)
+        self.blit_full()
+        dim = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 140))
+        self.screen.blit(dim, (0, 0))
+        o = self.save.opts
+        self.text("OPCIONES", self.f_title, (LW / 2, 60), GOLD, center=True)
+        vals = {
+            "music": ("Música", "sí" if o["music"] else "no"),
+            "voices": ("Voces", "sí" if o["voices"] else "no"),
+            "quality": ("Luz y bloom", "alta" if self.quality else "baja"),
+            "volume": ("Volumen", "▮" * o["volume"] + "▯" * (10 - o["volume"])),
+            "fullscreen": ("Pantalla completa", "sí" if self.fullscreen else "no"),
+            "back": ("Volver", ""),
+        }
+        for k, item in enumerate(self.OPTS):
+            y = 120 + k * 22
+            sel = k == self.opt_sel
+            name, val = vals[item]
+            if sel:
+                r = self.R(170, y - 3, 300, 19)
+                g = pygame.Surface(r.size, pygame.SRCALPHA)
+                g.fill((120, 30, 20, 140))
+                self.screen.blit(g, r.topleft)
+                pygame.draw.rect(self.screen, GOLD, r, 1)
+            self.text(name, self.f_med, (186, y), UI_ACC if sel else UI_FG)
+            self.text(val, self.f_med, (454, y), UI_FG, right=True)
+        self.text("↑↓ elegir · ←→ / Enter cambiar · Esc volver   ·   Mando: cruceta, A, B", self.f_tiny, (LW / 2, 340), UI_DIM, center=True)
+
+    # ── mando ────────────────────────────────────────────────────────────
+    def pad_event(self, ev) -> list:
+        """Traduce el mando: en los menús a teclas; en la partida, a órdenes."""
+        sdl = self._sdlc
+        out: list = []
+        if sdl is None:
+            return out
+        if ev.type == pygame.CONTROLLERDEVICEADDED:
+            try:
+                self.pads.append(sdl.Controller(ev.device_index))
+            except pygame.error:
+                pass
+            return out
+        if ev.type == pygame.CONTROLLERAXISMOTION:
+            v = ev.value / 32767
+            name = {pygame.CONTROLLER_AXIS_LEFTX: "lx", pygame.CONTROLLER_AXIS_LEFTY: "ly", pygame.CONTROLLER_AXIS_RIGHTX: "rx",
+                    pygame.CONTROLLER_AXIS_TRIGGERLEFT: "lt", pygame.CONTROLLER_AXIS_TRIGGERRIGHT: "rt"}.get(ev.axis)
+            if name is None:
+                return out
+            old = self.pad_axes[name]
+            self.pad_axes[name] = v
+            if self.mode == "play" and name in ("lt", "rt") and old < 0.5 <= v and self.p and not self.p.demo:
+                self.apply(("rr", self.p.world.rr + (5 if name == "rt" else -5)))
+            return out
+        if ev.type == pygame.CONTROLLERBUTTONUP:
+            self.pad_held.discard(ev.button)
+            if ev.button in (pygame.CONTROLLER_BUTTON_BACK, pygame.CONTROLLER_BUTTON_START):
+                self.pad_combo = 0
+            return out
+        if ev.type != pygame.CONTROLLERBUTTONDOWN:
+            return out
+        b = ev.button
+        self.pad_held.add(b)
+        key = lambda k: pygame.event.Event(pygame.KEYDOWN, key=k, mod=0, unicode="")  # noqa: E731
+        if self.mode != "play" or self.p is None:
+            m = {pygame.CONTROLLER_BUTTON_DPAD_UP: pygame.K_UP, pygame.CONTROLLER_BUTTON_DPAD_DOWN: pygame.K_DOWN,
+                 pygame.CONTROLLER_BUTTON_DPAD_LEFT: pygame.K_LEFT, pygame.CONTROLLER_BUTTON_DPAD_RIGHT: pygame.K_RIGHT,
+                 pygame.CONTROLLER_BUTTON_A: pygame.K_RETURN, pygame.CONTROLLER_BUTTON_START: pygame.K_RETURN,
+                 pygame.CONTROLLER_BUTTON_B: pygame.K_ESCAPE, pygame.CONTROLLER_BUTTON_Y: pygame.K_v}
+            if b in m:
+                out.append(key(m[b]))
+            return out
+        p = self.p
+        w = p.world
+        self.pad_active = True
+        x, y, inside = self.world_mouse()
+        held = self.pad_held
+        if b == pygame.CONTROLLER_BUTTON_A and inside and not p.demo:
+            if p.armed is not None:
+                self.use_armed(x, y)
+            else:
+                best, _ = w.pick(x, y, p.skill)
+                if best is not None:
+                    self.apply(("assign", best.id, str(p.skill)))
+        elif b == pygame.CONTROLLER_BUTTON_B:
+            p.armed = p.swap_a = None
+        elif b == pygame.CONTROLLER_BUTTON_X and "arancia" in w.shield and not p.demo:
+            self.apply(("palla", w.shield.index("arancia"), x, y))
+        elif b == pygame.CONTROLLER_BUTTON_Y and p.armed is not None and not p.demo:
+            self.use_armed(x, y)
+        elif b in (pygame.CONTROLLER_BUTTON_DPAD_LEFT, pygame.CONTROLLER_BUTTON_DPAD_RIGHT) and w.shield:
+            step = 1 if b == pygame.CONTROLLER_BUTTON_DPAD_RIGHT else -1
+            p.armed = 0 if p.armed is None else (p.armed + step) % len(w.shield)
+            self.sfx.play("click")
+        elif b == pygame.CONTROLLER_BUTTON_DPAD_UP or b == pygame.CONTROLLER_BUTTON_DPAD_DOWN:
+            p.armed = None
+        elif b in (pygame.CONTROLLER_BUTTON_LEFTSHOULDER, pygame.CONTROLLER_BUTTON_RIGHTSHOULDER):
+            step = 1 if b == pygame.CONTROLLER_BUTTON_RIGHTSHOULDER else -1
+            p.skill = SKILLS[(SKILLS.index(p.skill) + step) % 8]
+            self.sfx.play("click")
+        elif b == pygame.CONTROLLER_BUTTON_START:
+            if pygame.CONTROLLER_BUTTON_BACK in held:
+                self.pad_combo = 1
+            else:
+                p.paused = not p.paused
+        elif b == pygame.CONTROLLER_BUTTON_BACK:
+            if pygame.CONTROLLER_BUTTON_START in held:
+                self.pad_combo = 1
+            elif not p.demo:
+                self.apply(("dioneo",))
+        elif b == pygame.CONTROLLER_BUTTON_RIGHTSTICK:
+            p.ff = not p.ff
+        return out
 
     def draw_title(self) -> None:
         self.sfx.music("inferno")
@@ -4826,14 +5677,23 @@ class App:
         return ok
 
     def drain_events(self) -> None:
-        assert self.p is not None
-        ev = self.p.world.events
+        p = self.p
+        assert p is not None
+        ev = p.world.events
         for name in dict.fromkeys(ev):
             self.sfx.play(name)
         ev.clear()
+        w = p.world
+        if w.msg_serial != p.msg_seen and w.messages:
+            p.msg_seen = w.msg_serial
+            text, _, who = w.messages[-1]
+            self.sfx.speak(who, text)
 
     def world_mouse(self) -> tuple[int, int, bool]:
         assert self.p is not None
+        if self.pad_active:
+            x, y = int(self.vcur[0]), int(self.vcur[1])
+            return x + int(round(self.p.smooth_cam)), y, y < VIEW_H
         mx, my = pygame.mouse.get_pos()
         x, y = mx // self.s, my // self.s
         return x + int(round(self.p.smooth_cam)), y, y < VIEW_H
@@ -4992,6 +5852,20 @@ class App:
         p = self.p
         assert p is not None
         w = p.world
+        if self.pads:
+            ax = self.pad_axes
+            if abs(ax["lx"]) > 0.15 or abs(ax["ly"]) > 0.15:
+                self.pad_active = True
+                self.vcur[0] = max(0, min(VIEW_W - 1, self.vcur[0] + ax["lx"] * 5))
+                self.vcur[1] = max(0, min(VIEW_H - 1, self.vcur[1] + ax["ly"] * 5))
+            if abs(ax["rx"]) > 0.2:
+                p.cam = self._clamp_cam(w, p.cam + ax["rx"] * 8)
+            if self.pad_combo:
+                self.pad_combo += 1
+                if self.pad_combo > 120:
+                    self.pad_combo = 0
+                    if not p.demo:
+                        self.apply(("nuke",))
         keys = pygame.key.get_pressed()
         speed = 9 if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT] else 4
         if keys[pygame.K_LEFT]:
@@ -5045,18 +5919,18 @@ class App:
         x, y, inside = self.world_mouse()
         hover, count = w.pick(x, y, p.skill) if inside else (None, 0)
         p.renderer.draw(self.view, cam, self.frame)
+        pygame.mouse.set_visible(not inside and not self.pad_active)
         if inside:
             vx = x - cam
             col = (255, 255, 255) if p.armed is None else PALLE_INFO[w.shield[p.armed]][2] if p.armed < len(w.shield) else (255, 255, 255)
             if hover is not None and p.armed is None:
-                pygame.draw.rect(self.view, col, (hover.x - 6 - cam, hover.y - 14, 13, 15), 1)
+                pygame.draw.rect(self.view, col, (hover.x - 6 - cam, w.rmid(hover) - 8, 13, 15), 1)
             elif p.armed is not None:
                 pygame.draw.circle(self.view, col, (vx, y), 10 + int(2 * math.sin(self.frame * 0.3)), 1)
                 pygame.draw.circle(self.view, col, (vx, y), 2)
             else:
                 for a, b in (((-5, 0), (-2, 0)), ((2, 0), (5, 0)), ((0, -5), (0, -2)), ((0, 2), (0, 5))):
                     pygame.draw.line(self.view, col, (vx + a[0], y + a[1]), (vx + b[0], y + b[1]))
-        pygame.mouse.set_visible(not inside)
         self.blit_view(p.renderer.fx.shake)
         self.draw_hud(hover, count)
         self.draw_panel()
@@ -5076,6 +5950,9 @@ class App:
         self.text(f"Salvados {pct} % / {need} %   ·   En marcha {w.alive}   ·   Caídos {w.dead}", self.f_small, (8, 22),
                   UI_OK if w.saved >= lv.to_save else UI_FG)
         self.text(f"{lv.place} — «{lv.name}»", self.f_tiny, (8, 34), UI_DIM)
+        ps = p_marks(lv.id)
+        if ps is not None:
+            self.text("Frente: " + ("P " * ps if ps else "limpia"), self.f_tiny, (8, 58), (230, 130, 110))
         flags = []
         if p.demo:
             flags.append("DEMO")
@@ -5247,7 +6124,7 @@ class App:
         fx, fy = MINI.w / w.terrain.w, MINI.h / w.terrain.h
         for L in w.lemmings:
             c = (255, 220, 120) if not L.moria else (160, 220, 60)
-            self.screen.fill(c, self.R(MINI.x + L.x * fx, MINI.y + (L.y - 4) * fy, 1, 1))
+            self.screen.fill(c, self.R(MINI.x + L.x * fx, MINI.y + (w.rmid(L)) * fy, 1, 1))
         for g in w.guards:
             if not g.pacified:
                 self.screen.fill(UI_BAD, self.R(MINI.x + g.x * fx - 1, MINI.y + (g.y - 6) * fy, 2, 2))
@@ -5341,7 +6218,11 @@ class App:
     def on_ending(self, ev):
         if ev.type == pygame.KEYDOWN or (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1):
             if self.ending and self.ending["t"] > 120:
-                self.mode = "title"
+                if self.ending["kind"] == "giorni":  # la procesión vuelve a empezar
+                    self.sel = 0
+                    self.open_level(0)
+                else:
+                    self.mode = "title"
         return None
 
     def draw_ending(self) -> None:
@@ -5456,6 +6337,19 @@ class App:
             self.text(f"[{tag}]", self.f_small, (616, y + 1), col, right=True)
             y = self.para(desc, self.f_small, 40, y + 13, 560, UI_FG) + 6
         self.text("↑↓ desplazar · Esc volver", self.f_tiny, (LW / 2, 348), UI_DIM, center=True)
+
+
+PAD_EVENTS = {getattr(pygame, n) for n in ("CONTROLLERDEVICEADDED", "CONTROLLERAXISMOTION", "CONTROLLERBUTTONDOWN",
+                                            "CONTROLLERBUTTONUP") if hasattr(pygame, n)}
+
+
+def p_marks(i: int) -> int | None:
+    """Las siete P que el Ángel graba en la frente: cada cornisa borra una."""
+    if not 41 <= i <= 67:
+        return None
+    cornici = [(42, 45), (46, 48), (49, 51), (52, 54), (55, 57), (58, 60), (61, 63)]
+    done = sum(1 for lo, hi in cornici if i > hi)
+    return max(0, 7 - done)
 
 
 def roman(n: int) -> str:
@@ -5745,14 +6639,50 @@ def selftest(quick: bool = False) -> int:
     _run(w, 60)
     check("tres palle en diez segundos: «Palle, palle, palle!»", w.combo > 0 and len(w.shield) == 3)
 
+    print("Gravedad, gigantes y fuego:")
+    w = _lab()
+    w.terrain.k[:60, :] = DIRT  # techo
+    w.hazard[100:120, 70:72] = HZ_FLIP
+    L = _put(w, 60, 120)
+    flipped = False
+    for _ in range(80):
+        w.tick()
+        flipped |= L.inv and L.state == St.WALK
+    check("en el centro de la Tierra la gravedad se invierte", flipped and w.ry(L) == 59, f"inv={L.inv} y={w.ry(L)}")
+    w = _lab()
+    w.terrain.k[:] = AIR
+    w.terrain.k[60:, :80] = DIRT
+    w.terrain.k[140:, 80:] = DIRT
+    w.anteo = [(79, 60)]
+    L = _put(w, 60, 60)
+    _run(w, 80)
+    check("Anteo baja al alma al fondo del pozo", not L.removed and L.y == 140 and L.state == St.WALK, f"{L.state} y={L.y}")
+    w = _lab(mods=frozenset({"firerain"}))
+    w.shield = ["mecenate"]
+    w.art_queue = ["brunelleschi"]
+    w.do(("palla", 0, 80, 110))
+    check("Brunelleschi levanta una cúpula sobre el arenal", w.canopies == 1 and w.terrain.k[120 - 30, 80] == DIRT)
+    w = _lab(mods=frozenset({"blink"}))
+    w.phantoms.append({"r": (40, 100, 80, 104), "kind": "blink", "on": False, "mask": None})
+    _run(w, 2)
+    on = w.terrain.k[101, 50] == DIRT
+    _run(w, BLINK_ON + 2)
+    check("las promesas de la Luna aparecen y desaparecen", on and w.terrain.k[101, 50] == AIR)
+    w = _lab(mods=frozenset({"paradiso"}))
+    blk = _put(w, 60, 120)
+    w.assign(blk.id, Skill.FLAGELLANTE)
+    w.skills[Skill.PIAGNONE] = 0
+    check("en el Paraíso al Flagellante se le convence de seguir", w.assign(blk.id, Skill.PIAGNONE) and blk.state == St.WALK)
+
     print("La Commedia (solución de referencia en cada nivel):")
     idxs = range(N_LEVELS) if not quick else range(0, N_LEVELS, 10)
     for i in idxs:
         lv = get_level(i)
         widths = {len(r) for r in lv.map}
         w, log = simulate(i, Autopilot(lv.solution))
-        check(f"{i:3d}. {lv.place[:34]:34s} {w.saved:3d}/{lv.total} (mín. {lv.to_save})",
-              w.success and len(widths) == 1 and len(lv.map) == ROWS, f"anchos {sorted(widths)}, ticks {w.tick_count}")
+        wh, _ = simulate(i, Autopilot(lv.solution), Campaign(HEAVY.peso, list(HEAVY.shield), False))
+        check(f"{i:3d}. {lv.place[:34]:34s} {w.saved:3d}/{wh.saved:3d}/{lv.total} (mín. {lv.to_save})",
+              w.success and wh.success and len(widths) == 1 and len(lv.map) == ROWS, f"anchos {sorted(widths)}, ticks {w.tick_count}")
         if i % 10 == 0:
             w2, _ = simulate(i, Replay(log))
             check("      la repetición reproduce la partida", (w2.saved, w2.dead, w2.tick_count) == (w.saved, w.dead, w.tick_count),
@@ -5761,13 +6691,20 @@ def selftest(quick: bool = False) -> int:
     return 1 if fails else 0
 
 
+HEAVY = Campaign(peso=30, shield=["congiura", "mecenate", "mecenate", "cambio", "cambio", "arancia", "arancia", "medicinale"],
+                 maestro=False)
+
+
 def calibrate() -> int:
+    """Almas que salva la solución de referencia, en el peor de dos casos: una Compagnia
+    ligera (sin Peso ni palle) y una cargada (Peso 30, escudo lleno)."""
     out = {}
     for i in range(N_LEVELS):
         lv = get_level(i)
-        w, _ = simulate(i, Autopilot(lv.solution))
-        out[i] = w.saved
-        print(f"{i:3d} {lv.place[:30]:30s} {w.saved}/{lv.total}", file=sys.stderr)
+        light, _ = simulate(i, Autopilot(lv.solution))
+        heavy, _ = simulate(i, Autopilot(lv.solution), Campaign(HEAVY.peso, list(HEAVY.shield), False))
+        out[i] = min(light.saved, heavy.saved)
+        print(f"{i:3d} {lv.place[:30]:30s} {light.saved}/{heavy.saved}/{lv.total}", file=sys.stderr)
     items = ", ".join(f"{k}: {v}" for k, v in out.items())
     print("CALIBRATION: dict[int, int] = {" + items + "}")
     return 0

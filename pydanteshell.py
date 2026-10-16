@@ -21,7 +21,7 @@ selftest comprueba.
     python pydanteshell.py --export-levels niveles/   # los 101 niveles en JSON
     python pydanteshell.py --custom mi_nivel.json     # jugar un nivel propio
 
-Ratón y teclado: 1–8 oficio · clic asignar · QWERTYUI palle · clic derecho naranja ·
+Ratón y teclado: 1–9 oficio · clic asignar · QWERTYUI palle · clic derecho naranja ·
 D Privilegio di Dioneo · C segundo intento (Purgatorio) · Tab artista del Mecenate ·
 F avance · Espacio pausa · Supr 2 s Dies Irae.
 Mando (SDL GameController): stick izq. cursor · A asignar · LB/RB oficio · X naranja ·
@@ -95,6 +95,7 @@ FEBBRE_TICKS = 60 * TPS  # fiebre → bubón
 BUBBONE_TICKS = 40 * TPS  # bubón → muerte
 FOCO_TICKS = 6 * TPS  # cadáver sin enterrar → foco
 IMMUNE_TICKS = 15 * TPS
+MEDICO_RANGE = 22  # radio en el que el Medico cura
 # Disciplina
 FERVOR_SLOW = 30 * TPS
 # Palle
@@ -133,6 +134,7 @@ class Skill(StrEnum):
     PIAGNONE = "piagnone"
     MINATORE = "minatore"
     BECCHINO = "becchino"
+    MEDICO = "medico"
 
 
 SKILLS: list[Skill] = list(Skill)
@@ -145,6 +147,7 @@ SKILL_NAMES = {
     Skill.PIAGNONE: "Piagnone",
     Skill.MINATORE: "Minatore",
     Skill.BECCHINO: "Becchino",
+    Skill.MEDICO: "Medico",
 }
 SKILL_HELP = {
     Skill.PELLEGRINO: "Trepa muros con el bordón",
@@ -155,6 +158,7 @@ SKILL_HELP = {
     Skill.PIAGNONE: "Abre túnel a golpes, como los de Savonarola",
     Skill.MINATORE: "Excava en diagonal, como en Malebolge",
     Skill.BECCHINO: "Cava en vertical; entierra focos de peste",
+    Skill.MEDICO: "Médico de la peste: inmune; cura la Moria a quien pasa cerca y apaga los focos",
 }
 
 
@@ -1207,7 +1211,7 @@ def build_level(i: int) -> Level:
     prog = (i - span[0]) / max(1, span[1] - span[0])
     tier = min(3, int(prog * 4))
     descending = cantica in ("proemio", "inferno", "paradiso")
-    total = 100 if P["special"] == "final" else 20 + round(30 * (i / 100))
+    total = 100  # cien almas blancas con una cruz roja al pecho, en cada nivel
     if P["special"] == "final":
         mb = MapBuilder(30, mods)
         mb.start()
@@ -1386,6 +1390,8 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
             skills[Skill.FLAGELLANTE] = 0
     for s in spare[: 2 - tier // 2]:
         skills[s] += 1
+    plague = P["moria"][0] or P["moria"][1] or "moria2" in mods
+    skills[Skill.MEDICO] = 4 if plague else 2
     if "fast" in mods:
         skills[Skill.FLAGELLANTE] = 0
     if "ingegno" == GIORNATE_MODS[giornata_of(i)]:
@@ -1479,7 +1485,7 @@ def _assemble(i, P, mb: MapBuilder, mods, total, cantica, tier, rr=50, seq=(), r
     to_save = min(need_n, cal) if cal is not None else max(1, math.ceil(total * 0.4))
     fire = None
     if P["special"] == "rogo":
-        fire = (55 * TPS, 0.10)
+        fire = (total * release_interval(rr) + 30 * TPS, 0.10)  # sube cuando ya ha salido la procesión
     hint_bits = [HINTS[s] for s in dict.fromkeys(seq) if s in HINTS][:2]
     if P["special"] == "selva":
         hint_bits = [HINTS["selva"], HINTS["dig"]]
@@ -1615,7 +1621,7 @@ def parse_map(rows: tuple[str, ...]):
 # Calibración: almas que salva la solución de referencia en cada nivel, en el peor
 # caso entre una Compagnia ligera y otra cargada (python pydanteshell.py --calibrate).
 # El mínimo exigido nunca la supera.
-CALIBRATION: dict[int, int] = {0: 21, 1: 20, 2: 21, 3: 21, 4: 20, 5: 22, 6: 22, 7: 19, 8: 22, 9: 12, 10: 17, 11: 23, 12: 24, 13: 24, 14: 24, 15: 19, 16: 22, 17: 24, 18: 24, 19: 26, 20: 26, 21: 17, 22: 27, 23: 25, 24: 16, 25: 25, 26: 26, 27: 18, 28: 16, 29: 22, 30: 26, 31: 17, 32: 30, 33: 29, 34: 30, 35: 30, 36: 31, 37: 31, 38: 31, 39: 32, 40: 32, 41: 32, 42: 33, 43: 33, 44: 33, 45: 34, 46: 34, 47: 34, 48: 34, 49: 35, 50: 35, 51: 35, 52: 36, 53: 36, 54: 36, 55: 28, 56: 24, 57: 34, 58: 37, 59: 38, 60: 38, 61: 19, 62: 34, 63: 26, 64: 29, 65: 30, 66: 40, 67: 40, 68: 40, 69: 41, 70: 41, 71: 41, 72: 42, 73: 42, 74: 42, 75: 42, 76: 43, 77: 43, 78: 43, 79: 44, 80: 44, 81: 44, 82: 45, 83: 45, 84: 45, 85: 46, 86: 46, 87: 46, 88: 46, 89: 47, 90: 47, 91: 47, 92: 48, 93: 48, 94: 48, 95: 48, 96: 49, 97: 49, 98: 49, 99: 50, 100: 100}
+CALIBRATION: dict[int, int] = {0: 101, 1: 100, 2: 100, 3: 100, 4: 99, 5: 100, 6: 100, 7: 97, 8: 100, 9: 69, 10: 73, 11: 100, 12: 100, 13: 100, 14: 100, 15: 80, 16: 82, 17: 99, 18: 99, 19: 100, 20: 100, 21: 82, 22: 100, 23: 98, 24: 73, 25: 97, 26: 98, 27: 90, 28: 80, 29: 93, 30: 97, 31: 98, 32: 100, 33: 99, 34: 100, 35: 100, 36: 100, 37: 100, 38: 100, 39: 100, 40: 100, 41: 100, 42: 100, 43: 100, 44: 100, 45: 100, 46: 100, 47: 100, 48: 100, 49: 100, 50: 100, 51: 100, 52: 100, 53: 100, 54: 100, 55: 78, 56: 68, 57: 90, 58: 100, 59: 100, 60: 100, 61: 84, 62: 96, 63: 87, 64: 100, 65: 100, 66: 100, 67: 100, 68: 100, 69: 100, 70: 100, 71: 100, 72: 100, 73: 100, 74: 100, 75: 100, 76: 100, 77: 100, 78: 100, 79: 100, 80: 100, 81: 100, 82: 100, 83: 100, 84: 100, 85: 100, 86: 100, 87: 100, 88: 100, 89: 100, 90: 100, 91: 100, 92: 100, 93: 100, 94: 100, 95: 100, 96: 100, 97: 100, 98: 100, 99: 100, 100: 100}
 
 
 CUSTOM: dict[int, Level] = {}  # niveles cargados desde JSON (id ≥ 1000)
@@ -1649,6 +1655,7 @@ class Lemming:
     fall: int = 0
     climber: bool = False
     floater: bool = False
+    medico: bool = False
     bomb: int | None = None
     bricks: int = 0
     removed: bool = False
@@ -1982,7 +1989,7 @@ class World:
     def can_assign(self, L: Lemming, skill: Skill) -> bool:
         if L.removed or L.state in DOOMED or L.maestro:
             return False
-        if L.moria == 2 and skill != Skill.BUBBONE:
+        if L.moria == 2 and skill not in (Skill.BUBBONE, Skill.MEDICO):
             return False
         match skill:
             case Skill.PELLEGRINO:
@@ -2001,6 +2008,8 @@ class World:
                 return L.state in GROUND_WORK and L.state != St.MINE
             case Skill.BECCHINO:
                 return L.state in GROUND_WORK and L.state != St.DIG
+            case Skill.MEDICO:
+                return not L.medico
         return False
 
     def lemmings_at(self, cx: int, cy: int) -> list[Lemming]:
@@ -2100,6 +2109,12 @@ class World:
                 self._set(L, St.MINE)
             case Skill.BECCHINO:
                 self._set(L, St.DIG)
+            case Skill.MEDICO:
+                L.medico = True
+                L.moria = L.moria_t = 0
+                L.immune = 10**9
+                self.emit(("cure", L.x, L.y - 8))
+                self.events.append("cure")
         self.events.append("assign")
         return True
 
@@ -2319,6 +2334,8 @@ class World:
                     self._pickups(L)
         self._frame(False)
         self._firerain()
+        if self.tick_count % 2 == 0:
+            self._medici()
         if self.tick_count % 4 == 0:
             self._contagion()
         self._rats()
@@ -2772,6 +2789,26 @@ class World:
                         L.moria, L.moria_t = 1, 0
                         self.fx.append(("infect", L.x, self.rmid(L) - 2))
                         break
+
+    def _medici(self) -> None:
+        """Los médicos de la peste curan a quien pasa a su lado y apagan los focos."""
+        docs = [L for L in self.lemmings if L.medico and not L.removed and L.state not in DOOMED]
+        if not docs:
+            return
+        r2 = MEDICO_RANGE * MEDICO_RANGE
+        for D in docs:
+            dx, dy = D.x, self.ry(D)
+            for L in self.lemmings:
+                if L.moria and not L.removed and L.state not in DOOMED and (L.x - dx) ** 2 + (self.ry(L) - dy) ** 2 <= r2:
+                    L.moria = L.moria_t = 0
+                    L.immune = max(L.immune, IMMUNE_TICKS)
+                    self.fx.append(("cure", L.x, self.rmid(L)))
+                    self.events.append("cure")
+            n = len(self.focos) + len(self.corpses)
+            self.focos = [f for f in self.focos if (f[0] - dx) ** 2 + (f[1] - dy) ** 2 > r2]
+            self.corpses = [c for c in self.corpses if (c[0] - dx) ** 2 + (c[1] - dy) ** 2 > r2]
+            if len(self.focos) + len(self.corpses) < n:
+                self.fx.append(("cure", dx, dy - 4))
 
     def _rats(self) -> None:
         if not self.rats or self.tick_count % 2:
@@ -4271,6 +4308,14 @@ class Renderer:
                     view.fill((255, 140, 40), (Lm.x - cam, Lm.y - 15 - (frame // 3) % 3, 1, 2))
             if Lm.grace:
                 view.fill((80, 110, 255), (Lm.x - cam, Lm.y - 15, 1, 1))
+            if Lm.medico:  # sombrero de ala y máscara de pico
+                hx, hy = Lm.x - cam, Lm.y - 12 + dy
+                view.fill((30, 26, 30), (hx - 3, hy - 1, 7, 1))
+                view.fill((30, 26, 30), (hx - 1, hy - 3, 3, 2))
+                view.fill((236, 226, 200), (hx + 2 * d, hy + 2, 2, 1))
+                view.fill((236, 226, 200), (hx + 3 * d, hy + 3, 1, 1))
+                if (frame // 10 + Lm.id) % 6 == 0:
+                    glow.fill((10, 40, 20), ((Lm.x - cam) // 4, (Lm.y - 8) // 4, 1, 1), special_flags=pygame.BLEND_ADD)
             if w.lume and Lm.fervor == 0 and Lm.state == St.WALK:
                 glow.fill((40, 36, 20), ((Lm.x - cam) // 4, (Lm.y - 8) // 4, 1, 1), special_flags=pygame.BLEND_ADD)
             if stones and Lm.id % stones == 0 and not Lm.maestro:  # el Peso hecho piedra
@@ -5208,6 +5253,8 @@ CODEX = [
     ("El rodeo de Caronte", "No hay pasarela en el Aqueronte de Dante: es la alternativa del diseño al óbolo.", "licencia"),
     ("DILIGITE IUSTITIAM", "Las almas de Júpiter escriben con luces «Diligite iustitiam qui iudicatis terram» (Par. XVIII).", "dato"),
     ("Hipócritas", "Capas doradas por fuera y de plomo por dentro (Inf. XXIII).", "dato"),
+    ("El Medico de la peste", "La máscara de pico es del siglo XVII; en 1348 los médicos no la llevaban. Ni curaban así.", "licencia"),
+    ("Cien almas", "Cada nivel suelta cien disciplinati: la procesión entera.", "licencia"),
 ]
 
 BRIGATA = {
@@ -5516,7 +5563,7 @@ UI_ACC = (255, 210, 110)
 UI_BAD = (230, 80, 64)
 UI_OK = (150, 220, 140)
 CANTICA_COL = {"proemio": (200, 150, 110), "inferno": (230, 90, 50), "purgatorio": (130, 180, 230), "paradiso": (255, 230, 150)}
-SKILL_X0, SKILL_W = 4, 42
+SKILL_X0, SKILL_W = 4, 37
 BTN_RR_DN, BTN_RR_UP, BTN_PAUSE, BTN_FF, BTN_NUKE = range(5)
 BTN_X = [344, 366, 390, 412, 434]
 MINI = pygame.Rect(478, VIEW_H + 6, 158, 40)
@@ -5670,6 +5717,11 @@ def draw_skill_icon(surf: pygame.Surface, skill: Skill, cx: int, cy: int, s: flo
         case Skill.BECCHINO:  # pala
             pygame.draw.line(surf, (160, 110, 60), P(0, -9), P(0, 2), lw * 2)
             pygame.draw.polygon(surf, col, [P(-4, 2), P(4, 2), P(3, 8), P(0, 10), P(-3, 8)])
+        case Skill.MEDICO:  # redoma de triaca con cruz verde
+            pygame.draw.polygon(surf, col, [P(-2, -9), P(2, -9), P(2, -4), P(6, 4), P(4, 8), P(-4, 8), P(-6, 4), P(-2, -4)], lw)
+            pygame.draw.polygon(surf, (80, 190, 110), [P(-5, 4), P(5, 4), P(4, 7), P(-4, 7)])
+            pygame.draw.line(surf, (120, 230, 140), P(0, -2), P(0, 3), lw)
+            pygame.draw.line(surf, (120, 230, 140), P(-2, 0), P(2, 0), lw)
 
 
 class App:
@@ -5766,6 +5818,8 @@ class App:
         self.f_it = F(9.5, it=True)
         self.f_small = F(7.5)
         self.f_tiny = F(6.5)
+        self.f_micro = F(5.2)
+        self.f_nano = F(4.4)
 
     # ── utilidades de dibujo ─────────────────────────────────────────────
     def R(self, x: float, y: float, w: float, h: float) -> pygame.Rect:
@@ -6129,7 +6183,7 @@ class App:
             p.armed = None
         elif b in (pygame.CONTROLLER_BUTTON_LEFTSHOULDER, pygame.CONTROLLER_BUTTON_RIGHTSHOULDER):
             step = 1 if b == pygame.CONTROLLER_BUTTON_RIGHTSHOULDER else -1
-            p.skill = SKILLS[(SKILLS.index(p.skill) + step) % 8]
+            p.skill = SKILLS[(SKILLS.index(p.skill) + step) % len(SKILLS)]
             self.sfx.play("click")
         elif b == pygame.CONTROLLER_BUTTON_START:
             if pygame.CONTROLLER_BUTTON_BACK in held:
@@ -6421,7 +6475,7 @@ class App:
                 self.sfx.play("click")
             elif k == pygame.K_RETURN and w.compagnia_done and w.maestro_out:
                 w.maestro_wait = 10**9
-            elif pygame.K_1 <= k <= pygame.K_8:
+            elif pygame.K_1 <= k <= pygame.K_9:
                 p.skill = SKILLS[k - pygame.K_1]
                 self.sfx.play("click")
             elif k in SLOT_KEYS and not p.demo:
@@ -6460,9 +6514,9 @@ class App:
             elif ev.button == 1:
                 if MINI.collidepoint(mx, my):
                     self.minimap_jump(mx)
-                elif mx < SKILL_X0 + 8 * SKILL_W:
+                elif mx < SKILL_X0 + len(SKILLS) * SKILL_W:
                     i = int((mx - SKILL_X0) // SKILL_W)
-                    if 0 <= i < 8:
+                    if 0 <= i < len(SKILLS):
                         p.skill = SKILLS[i]
                         self.sfx.play("click")
                 else:
@@ -6481,7 +6535,7 @@ class App:
             if ev.x:
                 p.cam = self._clamp_cam(w, p.cam - ev.x * 16)
             else:
-                i = (SKILLS.index(p.skill) - ev.y) % 8
+                i = (SKILLS.index(p.skill) - ev.y) % len(SKILLS)
                 p.skill = SKILLS[i]
                 self.sfx.play("click")
         return None
@@ -6675,7 +6729,7 @@ class App:
             self.text("   ".join(flags), self.f_small, (LW / 2, 4), UI_ACC, center=True)
         if p.paused:
             self.panel(140, 100, 360, 110, 210)
-            rows = ["1–8 / rueda: oficio · clic: asignar · ←→ / bordes / minimapa: cámara",
+            rows = ["1–9 / rueda: oficio · clic: asignar · ←→ / bordes / minimapa: cámara",
                     "Q W E R T Y U I: armar palla · clic: usarla · clic derecho: lanzar naranja",
                     "Mayús + tecla: devolver palla (avaros) · D: Privilegio di Dioneo",
                     "+ / −: cadenza · F: avance ×4 · Supr 2 s (o N dos veces): Dies Irae",
@@ -6706,6 +6760,8 @@ class App:
                 tag += " · bordón"
             if hover.floater:
                 tag += " · alas"
+            if hover.medico:
+                tag += " · médico"
             if hover.moria:
                 tag += " · " + ("FEBBRE" if hover.moria == 1 else "BUBBONE")
             if hover.fervor > FERVOR_SLOW:
@@ -6782,6 +6838,11 @@ class App:
         w = p.world
         s = self.s
         top = VIEW_H
+        mx, my = pygame.mouse.get_pos()
+        mx, my = mx / s, my / s
+        if my >= top and SKILL_X0 <= mx < SKILL_X0 + len(SKILLS) * SKILL_W and not self.pad_active:
+            hk = SKILLS[int((mx - SKILL_X0) // SKILL_W)]
+            self.text(f"{SKILL_NAMES[hk]}: {SKILL_HELP[hk]}", self.f_small, (8, top - 12), (255, 236, 190))
         # la predela: madera oscura y oro
         bg = cached_gradient(LW * s, PANEL_H * s, (54, 34, 24), (22, 14, 10))
         self.screen.blit(bg, (0, top * s))
@@ -6804,11 +6865,13 @@ class App:
             n = w.has_skill(sk)
             label = "∞" if w.infinite and n else str(w.skills[sk]) if n else "–"
             col = (240, 232, 214) if n else (90, 80, 76)
-            draw_skill_icon(self.screen, sk, int((x + SKILL_W / 2) * s), int((top + 33) * s), s * 0.95, col)
-            self.text(label, self.f_small if label != "∞" else self.f_med, (x + SKILL_W / 2, top + 12), UI_ACC if n else UI_DIM, center=True)
-            self.text(f"{i + 1}", self.f_tiny, (x + 4, top + PANEL_H - 12), UI_DIM, shadow=False)
-            if sel:
-                self.text(SKILL_NAMES[sk], self.f_tiny, (x + SKILL_W / 2, top + PANEL_H - 12), UI_ACC, center=True)
+            draw_skill_icon(self.screen, sk, int((x + SKILL_W / 2) * s), int((top + 31) * s), s * 0.9, col)
+            self.text(label, self.f_small if label != "∞" else self.f_med, (x + SKILL_W / 2, top + 11), UI_ACC if n else UI_DIM, center=True)
+            self.text(f"{i + 1}", self.f_micro, (x + 3, top + 7), UI_DIM, shadow=False)
+            name = SKILL_NAMES[sk].upper()
+            nf = self.f_micro if self.f_micro.size(name)[0] / s <= SKILL_W - 4 else self.f_nano
+            self.text(name, nf, (x + SKILL_W / 2, top + PANEL_H - 11),
+                      UI_ACC if sel else (205, 190, 165) if n else UI_DIM, center=True, shadow=False)
         labels = [("−", str(w.rr_min)), ("+", str(w.rr)), ("‖", ""), ("»", ""), ("Dies Irae", "")]
         for bi, bx in enumerate(BTN_X):
             wd = 20 if bi < 4 else 40
@@ -7348,6 +7411,18 @@ def selftest(quick: bool = False) -> int:
     L = _put(w, 60, 120)
     _run(w, 60)
     check("tres palle en diez segundos: «Palle, palle, palle!»", w.combo > 0 and len(w.shield) == 3)
+
+    w = _lab()
+    doc = _put(w, 40, 120)
+    sick = [_put(w, 60 + k * 3, 120) for k in range(4)]
+    for o in sick:
+        o.moria = 2
+        o.state = St.BLOCK
+    w.foco_test = w.focos.append((70, 120))
+    check("el Medico acepta el oficio", w.assign(doc.id, Skill.MEDICO) and doc.medico)
+    _run(w, 60)
+    check("el Medico cura la Moria y apaga los focos a su paso",
+          all(o.moria == 0 and o.immune > 0 for o in sick) and not w.focos, str([o.moria for o in sick]))
 
     print("Gravedad, gigantes y fuego:")
     w = _lab()

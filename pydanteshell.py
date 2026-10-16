@@ -149,16 +149,28 @@ SKILL_NAMES = {
     Skill.BECCHINO: "Becchino",
     Skill.MEDICO: "Medico",
 }
+# Lo que hace cada oficio, dicho como en Lemmings: el verbo en el botón.
+SKILL_ACTION = {
+    Skill.PELLEGRINO: "ESCALAR",
+    Skill.GERIONE: "PLANEAR",
+    Skill.BUBBONE: "EXPLOTAR",
+    Skill.FLAGELLANTE: "BLOQUEAR",
+    Skill.CAPOMASTRO: "ESCALERA",
+    Skill.PIAGNONE: "EXCAVAR",
+    Skill.MINATORE: "PICAR",
+    Skill.BECCHINO: "CAVAR",
+    Skill.MEDICO: "CURAR",
+}
 SKILL_HELP = {
-    Skill.PELLEGRINO: "Trepa muros con el bordón",
-    Skill.GERIONE: "Desciende en espiral, como a lomos de Gerión",
-    Skill.BUBBONE: "Cinco segundos y revienta: abre un cráter y contagia",
-    Skill.FLAGELLANTE: "Se planta y se azota; los demás rebotan. Contagia",
-    Skill.CAPOMASTRO: "Doce ladrillos de escalera, como Brunelleschi",
-    Skill.PIAGNONE: "Abre túnel a golpes, como los de Savonarola",
-    Skill.MINATORE: "Excava en diagonal, como en Malebolge",
-    Skill.BECCHINO: "Cava en vertical; entierra focos de peste",
-    Skill.MEDICO: "Médico de la peste: inmune; cura la Moria a quien pasa cerca y apaga los focos",
+    Skill.PELLEGRINO: "trepa paredes verticales con el bordón (para siempre)",
+    Skill.GERIONE: "abre las alas y baja planeando desde cualquier altura (para siempre)",
+    Skill.BUBBONE: "cuenta cinco segundos y revienta: abre un agujero en la roca",
+    Skill.FLAGELLANTE: "se planta y no deja pasar: los demás se dan la vuelta",
+    Skill.CAPOMASTRO: "construye una escalera de doce peldaños hacia delante y arriba",
+    Skill.PIAGNONE: "excava un túnel horizontal a puñetazos",
+    Skill.MINATORE: "pica en diagonal hacia abajo",
+    Skill.BECCHINO: "cava un pozo vertical hacia abajo",
+    Skill.MEDICO: "cura la peste a quien pasa a su lado, apaga los focos y es inmune (para siempre)",
 }
 
 
@@ -184,18 +196,18 @@ class St(StrEnum):
 
 
 STATE_NAMES = {
-    St.WALK: "En procesión",
+    St.WALK: "Caminando",
     St.FALL: "Cayendo",
-    St.FLOAT: "Gerione",
-    St.CLIMB: "Pellegrino",
-    St.HOIST: "Pellegrino",
-    St.BLOCK: "Flagellante",
-    St.BUILD: "Capomastro",
-    St.SHRUG: "Capomastro",
-    St.BASH: "Piagnone",
-    St.MINE: "Minatore",
-    St.DIG: "Becchino",
-    St.OHNO: "¡Bubbone!",
+    St.FLOAT: "Planeando",
+    St.CLIMB: "Escalando",
+    St.HOIST: "Escalando",
+    St.BLOCK: "Bloqueando",
+    St.BUILD: "Construyendo escalera",
+    St.SHRUG: "Escalera terminada",
+    St.BASH: "Excavando",
+    St.MINE: "Picando",
+    St.DIG: "Cavando",
+    St.OHNO: "¡Va a explotar!",
     St.SPLAT: "Caído",
     St.DROWN: "Ahogado",
     St.BURN: "Ardiendo",
@@ -5748,8 +5760,7 @@ class App:
         self.sfx.set_volume(o["volume"] / 10)
         self.quality = 0 if args.lowfx else int(o["quality"])
         self.lang = o["lang"] if o["lang"] in LANGS else "es"
-        self.infinite = bool(o["infinite"]) and not getattr(args, "limited", False)
-        self.replay_infinite = False
+        self.infinite = True  # los oficios no se agotan nunca
         self.opt_sel = 0
         # mando: cursor virtual y ejes
         self.pads: list = []
@@ -5781,7 +5792,6 @@ class App:
         self.args = args
         if args.replay:
             data = json.loads(Path(args.replay).read_text())
-            self.replay_infinite = bool(data.get("infinite", False))
             self.start_play(int(data["level"]), pilot=Replay(data["commands"]), demo=True)
         elif args.demo is not None:
             self.start_play(args.demo, pilot=Autopilot(get_level(args.demo).solution), demo=True)
@@ -5909,7 +5919,7 @@ class App:
         if self.preview and self.preview[0] == idx and pilot is None:
             _, w, r = self.preview
         else:
-            w = World(get_level(idx), camp, infinite=self.infinite if not demo else self.replay_infinite)
+            w = World(get_level(idx), camp, infinite=True)
             r = Renderer(w, self.sprites, self.quality)
         self.preview = None
         cam = w.entrances[0].x - VIEW_W // 2 if w.entrances else 0
@@ -6033,7 +6043,7 @@ class App:
         return None
 
     # ── opciones ─────────────────────────────────────────────────────────
-    OPTS = ["infinite", "music", "voices", "lang", "quality", "volume", "fullscreen", "back"]
+    OPTS = ["music", "voices", "lang", "quality", "volume", "fullscreen", "back"]
 
     def on_options(self, ev):
         if ev.type != pygame.KEYDOWN and not (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1):
@@ -6041,7 +6051,7 @@ class App:
         o = self.save.opts
         key = getattr(ev, "key", pygame.K_RETURN)
         if ev.type == pygame.MOUSEBUTTONDOWN:
-            k = int((ev.pos[1] / self.s - 100) // 22)
+            k = int((ev.pos[1] / self.s - 110) // 22)
             if 0 <= k < len(self.OPTS):
                 self.opt_sel = k
         if key == pygame.K_ESCAPE:
@@ -6064,8 +6074,6 @@ class App:
             case "voices":
                 o["voices"] = self.sfx.voices = not o["voices"]
                 self.sfx.speak("Virgilio", "Or va, ch'un sol volere è d'ambedue")
-            case "infinite":
-                o["infinite"] = self.infinite = not self.infinite
             case "lang":
                 self.lang = LANGS[(LANGS.index(self.lang) + delta) % len(LANGS)]
                 o["lang"] = self.lang
@@ -6092,7 +6100,6 @@ class App:
         o = self.save.opts
         self.text("OPCIONES", self.f_title, (LW / 2, 60), GOLD, center=True)
         vals = {
-            "infinite": ("Oficios", "infinitos" if self.infinite else "limitados (diseño)"),
             "music": ("Música", "sí" if o["music"] else "no"),
             "voices": ("Voces (recitado en italiano)", "sí" if o["voices"] else "no"),
             "lang": ("Subtítulos", LANG_NAMES[self.lang]),
@@ -6102,7 +6109,7 @@ class App:
             "back": ("Volver", ""),
         }
         for k, item in enumerate(self.OPTS):
-            y = 100 + k * 22
+            y = 110 + k * 22
             sel = k == self.opt_sel
             name, val = vals[item]
             if sel:
@@ -6397,7 +6404,7 @@ class App:
         self.text(f"{lv.total} disciplinati · salvar {lv.to_save} ({pct} %) · {days} ({lv.minutes} min) · cadenza {lv.rr} · {lv.difficulty}",
                   self.f_med, (LW / 2, y), UI_ACC, center=True)
         y += 16
-        skills = [f"{SKILL_NAMES[k]} {'∞' if w.infinite else w.skills[k]}" for k in SKILLS if w.has_skill(k)]
+        skills = [f"{SKILL_ACTION[k].capitalize()} ∞" for k in SKILLS if w.has_skill(k)]
         y = self.para("  ·  ".join(skills), self.f_small, 44, y, 552, UI_OK, center=True) + 4
         gm = GIORNATE[lv.giornata]
         self.text(f"Giornata {roman(lv.giornata + 1)} — {gm[0]}: {gm[3]}", self.f_small, (LW / 2, y), (200, 200, 240), center=True)
@@ -6757,13 +6764,13 @@ class App:
             elif hover.child:
                 tag = "Michelangelo, el niño"
             if hover.climber:
-                tag += " · bordón"
+                tag += " · escala"
             if hover.floater:
-                tag += " · alas"
+                tag += " · planea"
             if hover.medico:
-                tag += " · médico"
+                tag += " · cura"
             if hover.moria:
-                tag += " · " + ("FEBBRE" if hover.moria == 1 else "BUBBONE")
+                tag += " · " + ("con fiebre" if hover.moria == 1 else "peste grave: solo acepta Explotar o Curar")
             if hover.fervor > FERVOR_SLOW:
                 tag += " · se azota"
             self.text(f"{tag}  ({count})", self.f_small, (8, 46), (255, 230, 150))
@@ -6842,7 +6849,7 @@ class App:
         mx, my = mx / s, my / s
         if my >= top and SKILL_X0 <= mx < SKILL_X0 + len(SKILLS) * SKILL_W and not self.pad_active:
             hk = SKILLS[int((mx - SKILL_X0) // SKILL_W)]
-            self.text(f"{SKILL_NAMES[hk]}: {SKILL_HELP[hk]}", self.f_small, (8, top - 12), (255, 236, 190))
+            self.text(f"{SKILL_ACTION[hk].capitalize()} ({SKILL_NAMES[hk]}): {SKILL_HELP[hk]}", self.f_small, (8, top - 12), (255, 236, 190))
         # la predela: madera oscura y oro
         bg = cached_gradient(LW * s, PANEL_H * s, (54, 34, 24), (22, 14, 10))
         self.screen.blit(bg, (0, top * s))
@@ -6868,7 +6875,7 @@ class App:
             draw_skill_icon(self.screen, sk, int((x + SKILL_W / 2) * s), int((top + 31) * s), s * 0.9, col)
             self.text(label, self.f_small if label != "∞" else self.f_med, (x + SKILL_W / 2, top + 11), UI_ACC if n else UI_DIM, center=True)
             self.text(f"{i + 1}", self.f_micro, (x + 3, top + 7), UI_DIM, shadow=False)
-            name = SKILL_NAMES[sk].upper()
+            name = SKILL_ACTION[sk]
             nf = self.f_micro if self.f_micro.size(name)[0] / s <= SKILL_W - 4 else self.f_nano
             self.text(name, nf, (x + SKILL_W / 2, top + PANEL_H - 11),
                       UI_ACC if sel else (205, 190, 165) if n else UI_DIM, center=True, shadow=False)
@@ -7620,7 +7627,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mute", action="store_true", help="sin sonido")
     ap.add_argument("--lowfx", action="store_true", help="sin bloom ni grano (equipos modestos)")
     ap.add_argument("--all", action="store_true", help="desbloquear toda la Commedia")
-    ap.add_argument("--limited", action="store_true", help="oficios limitados, como en el diseño original")
     ap.add_argument("--export-levels", metavar="CARPETA", help="escribir los 101 niveles en JSON (formato del diseño)")
     ap.add_argument("--custom", metavar="NIVEL.json", help="jugar un nivel propio en JSON")
     args = ap.parse_args(argv)

@@ -20,8 +20,11 @@ selftest comprueba.
     python pydanteshell.py --all        # desbloquear la Commedia entera
     python pydanteshell.py --export-levels niveles/   # los 101 niveles en JSON
     python pydanteshell.py --custom mi_nivel.json     # jugar un nivel propio
+    python pydanteshell.py --daily      # el Giudizio del giorno
+    python pydanteshell.py --endless    # modo Infinito
 
-Ratón y teclado: 1–9 oficio · clic asignar · QWERTYUI palle · clic derecho naranja ·
+Ratón y teclado: 1–9 oficio · clic asignar · Retroceso rebobinar · «.» un paso · F5 reiniciar ·
+H ocultar HUD · F12 foto · QWERTYUI palle · clic derecho naranja ·
 D Privilegio di Dioneo · C segundo intento (Purgatorio) · Tab artista del Mecenate ·
 F avance · Espacio pausa · Supr 2 s Dies Irae.
 Mando (SDL GameController): stick izq. cursor · A asignar · LB/RB oficio · X naranja ·
@@ -31,6 +34,8 @@ cruceta + Y palle · LT/RT cadenza · Start pausa · Select Dioneo · Select+Sta
 from __future__ import annotations
 
 import argparse
+import copy
+import datetime
 import json
 import math
 import os
@@ -720,6 +725,7 @@ class Level:
     special: str = ""
     guide: str = "Virgilio"
     target_pct: int = 50
+    base: int = -1  # nivel de la Commedia del que deriva (desafíos, infinito)
     phantoms: tuple[tuple[int, int, int, int, str, bool], ...] = ()  # (x0, y0, x1, y1, tipo, del revés)
     boats: tuple[tuple[int, int, int], ...] = ()  # (x0, x1, y) del tramo de fango
     liquid: tuple[int, int, int] | None = None
@@ -1212,9 +1218,9 @@ GUIDE_LINES = {
 }
 
 
-def build_level(i: int) -> Level:
+def build_level(i: int, seed: int | None = None) -> Level:
     P = place_info(i)
-    rng = random.Random(1348 * 31 + i * 977)
+    rng = random.Random(1348 * 31 + i * 977 if seed is None else seed)
     cantica = cantica_of(i)
     mods = set(P["mods"])
     if cantica == "paradiso" and P["special"] != "final":
@@ -1648,6 +1654,25 @@ def get_level(i: int) -> Level:
     return CUSTOM[i] if i in CUSTOM else _built(i)
 
 
+DAILY_ID, ENDLESS_ID = 2000, 3000
+VARIANT_BASES = [i for i in range(2, 100) if place_info(i)["special"] not in ("selva", "lucifero", "final", "child")]
+
+
+def make_variant(lid: int, seed: int, title: str) -> Level:
+    """Un nivel nuevo generado con otra semilla sobre un lugar de la Commedia. Su mínimo se
+    calibra al vuelo con la solución de referencia, así que siempre es resoluble."""
+    from dataclasses import replace as _rp
+
+    base = random.Random(seed).choice(VARIANT_BASES)
+    lv = _rp(build_level(base, seed=seed), id=lid, base=base, name=title)
+    CUSTOM[lid] = lv
+    w, _ = simulate(lid, Autopilot(lv.solution))
+    need = max(1, min(math.ceil(lv.total * lv.target_pct / 100), w.saved))
+    lv = _rp(lv, to_save=need)
+    CUSTOM[lid] = lv
+    return lv
+
+
 N_LEVELS = 101
 
 
@@ -1891,6 +1916,8 @@ class World:
         self.flame_said = False
         self.notes: list[str] = []
         self.art_queue: list[str] = []
+        self.cured = 0
+        self.combo_hit = False
         if self.toll:
             self.say("El Cocito cobra la traición: {n} alma(s) quedan presas en el hielo de la Antenora.", "Virgilio", n=self.toll)
         if level.special == "bulla":
@@ -1907,6 +1934,26 @@ class World:
             self.say("Virgilio se ha ido. Llega Beatrice, velada, entre flores.", "")
         if "suicidi" in self.mods:
             self.say("Cada rama que se rompe aquí sangra. Excavar cuesta Peso.", "Virgilio")
+
+    # ── viaje en el tiempo ───────────────────────────────────────────────
+    def snapshot(self) -> World:
+        """Copia congelada del mundo (para rebobinar). Las vistas del revés se rehacen al volver."""
+        keep = (self.ti, self.hi, self.events, self.fx)
+        self.ti = self.hi = None
+        self.events, self.fx = [], []
+        try:
+            return copy.deepcopy(self)
+        finally:
+            self.ti, self.hi, self.events, self.fx = keep
+
+    @staticmethod
+    def thaw(snap: World) -> World:
+        w = copy.deepcopy(snap)
+        w.ti = FlipTerrain(w.tn)
+        w.hi = w.hn[::-1]
+        w._frame(False)
+        w.tn.dirty = (0, 0, w.tn.w, w.tn.h)
+        return w
 
     # ── utilidades ───────────────────────────────────────────────────────
     def _floor_at(self, x: int) -> int | None:
@@ -1989,7 +2036,8 @@ class World:
         ni Flagellante; la acedia no deja pararse."""
         if self.cantica == "paradiso" and skill in (Skill.BUBBONE, Skill.BECCHINO):
             return False
-        if skill == Skill.FLAGELLANTE and (self.level.id >= 99 and self.cantica == "paradiso" or "fast" in self.mods):
+        lid = self.level.base if self.level.base >= 0 else self.level.id
+        if skill == Skill.FLAGELLANTE and (lid >= 99 and self.cantica == "paradiso" or "fast" in self.mods):
             return False
         return True
 
@@ -2517,6 +2565,8 @@ class World:
                             self.say("El Maestro ha llegado: el resto lo sigue con más ritmo.", "")
                     else:
                         self.saved += 1
+                        if L.child:
+                            self.child_saved = True
                     self.events.append("yippee")
                     self.emit(("saved", L.x, L.y - 6))
 
@@ -2814,6 +2864,7 @@ class World:
                 if L.moria and not L.removed and L.state not in DOOMED and (L.x - dx) ** 2 + (self.ry(L) - dy) ** 2 <= r2:
                     L.moria = L.moria_t = 0
                     L.immune = max(L.immune, IMMUNE_TICKS)
+                    self.cured += 1
                     self.fx.append(("cure", L.x, self.rmid(L)))
                     self.events.append("cure")
             n = len(self.focos) + len(self.corpses)
@@ -3247,6 +3298,7 @@ class World:
             if len(self.pick_times) >= 3:
                 self.pick_times.clear()
                 self.combo = COMBO_TICKS
+                self.combo_hit = True
                 self.panic = 0
                 self.events.append("combo")
                 self.say("«Palle, palle, palle!» La Compagnia corre al doble.", "")
@@ -3989,6 +4041,9 @@ class Renderer:
         self.mini: pygame.Surface | None = None
         self.mini_age = 999
         self.smoke = self._smoke_layer() if "smoke" in world.mods else None
+        self.reduce_motion = False  # sin temblor, grano ni parpadeos
+        self.markers = True  # iconos de enfermedad (no depender solo del color)
+        self.contrast = False  # luz ambiente más alta
 
     # ── recursos ────────────────────────────────────────────────────────
     @staticmethod
@@ -4201,7 +4256,7 @@ class Renderer:
                 view.blit(wide, (0, 0), special_flags=pygame.BLEND_ADD)
         # 8) post
         view.blit(self.vignette, (0, 0), special_flags=pygame.BLEND_MULT)
-        if self.q >= 2:
+        if self.q >= 2 and not self.reduce_motion:
             view.blit(self.grain[frame % 4], (0, 0), special_flags=pygame.BLEND_ADD)
         if w.panic:
             view.fill((40, 0, 0), special_flags=pygame.BLEND_ADD)
@@ -4217,6 +4272,8 @@ class Renderer:
             amb = amb * 0.12
         if w.reveal:
             amb = np.maximum(amb, 170)
+        if self.contrast:
+            amb = np.maximum(amb, 175)
         L = self.light
         L.fill(tuple(int(v) for v in amb))
         cand = th.candles or night > 0.3 or dark
@@ -4307,6 +4364,14 @@ class Renderer:
             view.blit(img, (x, y))
             if Lm.moria == 2:
                 view.fill((60, 120, 20), (Lm.x - cam + (2 if d > 0 else -3), Lm.y - 7, 2, 2))
+            if self.markers and Lm.moria:  # forma, no solo color: «!» fiebre, cruz roja bubón
+                mx_, my_ = Lm.x - cam, Lm.y - 20
+                if Lm.moria == 1:
+                    view.fill((255, 230, 80), (mx_, my_, 1, 3))
+                    view.fill((255, 230, 80), (mx_, my_ + 4, 1, 1))
+                else:
+                    view.fill((255, 60, 50), (mx_ - 1, my_ + 1, 3, 1))
+                    view.fill((255, 60, 50), (mx_, my_, 1, 3))
             if Lm.bomb is not None:
                 dd = str(min(5, math.ceil(Lm.bomb / TPS)))
                 view.blit(self.sp.digits[dd], (Lm.x - 1 - cam, Lm.y - 19))
@@ -4676,6 +4741,44 @@ class Renderer:
         if not dim and GUARDS[k][2] and g.touched:
             frac = g.timer / (GUARDS[k][2] * TPS)
             pygame.draw.arc(view, (255, 240, 180), (g.x - cam - 8, y - 46, 16, 16), math.pi / 2, math.pi / 2 + frac * math.tau, 2)
+
+
+def skill_shadow(w: World, L: Lemming, skill: Skill) -> list[tuple[int, int]]:
+    """Puntos (marco del alma) por donde irá el oficio, como las sombras de NeoLemmix."""
+    t = w.ti if L.inv else w.tn
+    pts: list[tuple[int, int]] = []
+    x, y, d = L.x, L.y, L.dir
+    steel = lambda xx, yy: 0 <= yy < t.h and 0 <= xx < t.w and t.k[yy, xx] in (STEEL,)  # noqa: E731
+    if skill == Skill.CAPOMASTRO:
+        for k in range(BRICKS):
+            for dx in range(0, 6, 2):
+                pts.append((x + 2 * k * d + dx * d, y - 1 - k))
+    elif skill == Skill.PIAGNONE:
+        for k in range(0, 200, 2):
+            xx = x + k * d
+            if steel(xx, y - 4) or not (0 <= xx < t.w):
+                break
+            pts += [(xx, y - 10), (xx, y)]
+    elif skill == Skill.MINATORE:
+        for k in range(0, 80):
+            xx, yy = x + 2 * k * d, y + k
+            if steel(xx, yy) or yy >= t.h:
+                break
+            pts += [(xx, yy - 10), (xx + 2 * d, yy)]
+    elif skill == Skill.BECCHINO:
+        for k in range(0, 160, 2):
+            if steel(x, y + k) or y + k >= t.h:
+                break
+            pts += [(x - 5, y + k), (x + 5, y + k)]
+    elif skill == Skill.BUBBONE:
+        for a in range(0, 360, 12):
+            pts.append((x + int(BOMB_RADIUS * math.cos(math.radians(a))), y - 6 + int(BOMB_RADIUS * math.sin(math.radians(a)))))
+    elif skill == Skill.MEDICO:
+        for a in range(0, 360, 10):
+            pts.append((x + int(MEDICO_RANGE * math.cos(math.radians(a))), y - 6 + int(MEDICO_RANGE * math.sin(math.radians(a)))))
+    if L.inv:
+        pts = [(px, VIEW_H - 1 - py) for px, py in pts]
+    return pts
 
 
 def _overlay(mask: np.ndarray, colors: np.ndarray, alpha: int) -> pygame.Surface:
@@ -5606,7 +5709,7 @@ class Save:
     def opts(self) -> dict:
         o = self.data.setdefault("opts", {})
         for k, v in {"music": True, "voices": True, "quality": 2, "volume": 8, "fullscreen": False, "lang": "es",
-                     "infinite": True}.items():
+                     "infinite": True, "motion": True, "markers": True, "contrast": False, "shadows": True}.items():
             o.setdefault(k, v)
         return o
 
@@ -5620,6 +5723,20 @@ class Save:
             c = Campaign()
         c.dioneo = not self.data["dioneo"].get(str(giornata_of(i)), False)
         return c
+
+    def best(self, i: int) -> dict:
+        return self.data.setdefault("best", {}).get(str(i), {})
+
+    def record_best(self, i: int, w: World) -> tuple[int, bool]:
+        """Guarda el mejor resultado y devuelve (estrellas, ¿récord nuevo?)."""
+        stars = level_stars(w.saved, w.level.to_save, w.total)
+        b = self.data.setdefault("best", {})
+        old = b.get(str(i), {})
+        new = w.saved > old.get("saved", -1) or (w.saved == old.get("saved") and w.tick_count < old.get("ticks", 10**9))
+        if new:
+            b[str(i)] = {"saved": w.saved, "ticks": w.tick_count, "stars": max(stars, old.get("stars", 0))}
+        self.write()
+        return stars, new and bool(old)
 
     def record(self, i: int, w: World, camp: Campaign) -> None:
         self.data["levels"][str(i)] = {"saved": w.saved, "total": w.total, "camp": camp.to_json()}
@@ -5675,6 +5792,9 @@ class PlayState:
     nuke_hold: int = 0
     nuke_armed: int = 0
     msg_seen: int = 0
+    speed: int = 4
+    snaps: deque = field(default_factory=lambda: deque(maxlen=45))
+    rewinds: int = 0
     rr_hold: int = 0
     hold_t: int = 0
     end_wait: float = 0.0
@@ -5790,6 +5910,9 @@ class App:
         self.scroll = 0
         self.title_scene = TitleScene(self.sprites)
         self.args = args
+        self.hide_hud = False
+        self.toasts: list[list] = []
+        self.endless: dict | None = None
         if args.replay:
             data = json.loads(Path(args.replay).read_text())
             self.start_play(int(data["level"]), pilot=Replay(data["commands"]), demo=True)
@@ -5909,18 +6032,28 @@ class App:
 
     def open_preview(self, idx: int) -> None:
         camp = self.save.camp_for(idx)
+        if idx >= N_LEVELS:
+            camp = Campaign(maestro=False)
         w = World(get_level(idx), camp, infinite=self.infinite)
-        self.preview = (idx, w, Renderer(w, self.sprites, self.quality))
+        self.preview = (idx, w, self.renderer(w))
         self.mode = "preview"
         self.sfx.music(get_level(idx).cantica if get_level(idx).cantica != "proemio" else "firenze")
 
+    def renderer(self, w: World) -> Renderer:
+        r = Renderer(w, self.sprites, self.quality)
+        o = self.save.opts
+        r.reduce_motion = not o["motion"]
+        r.markers = o["markers"]
+        r.contrast = o["contrast"]
+        return r
+
     def start_play(self, idx: int, pilot=None, demo: bool = False) -> None:
-        camp = self.save.camp_for(idx) if not demo else Campaign()
+        camp = self.save.camp_for(idx) if not demo and idx < N_LEVELS else Campaign(maestro=idx < N_LEVELS)
         if self.preview and self.preview[0] == idx and pilot is None:
             _, w, r = self.preview
         else:
             w = World(get_level(idx), camp, infinite=True)
-            r = Renderer(w, self.sprites, self.quality)
+            r = self.renderer(w)
         self.preview = None
         cam = w.entrances[0].x - VIEW_W // 2 if w.entrances else 0
         self.p = PlayState(idx, w, r, camp, cam=self._clamp_cam(w, cam), pilot=pilot, demo=demo)
@@ -5948,7 +6081,20 @@ class App:
                 verse = verse_of(p.idx)
             if p.idx == N_LEVELS - 1:
                 ending = self.decide_ending(w, camp)
-        self.result = {"idx": p.idx, "saved": w.saved, "total": w.total, "need": w.level.to_save, "ok": ok,
+        stars, record = (0, False)
+        if ok and not p.demo:
+            stars, record = self.save.record_best(p.idx, w)
+            if p.idx == DAILY_ID:
+                self.save.data.setdefault("daily", {})[w.level.name] = max(w.saved, self.save.data.get("daily", {}).get(w.level.name, 0))
+            if p.idx >= ENDLESS_ID and self.endless is not None:
+                self.endless["n"] += 1
+                best = max(self.save.data.get("endless_best", 0), self.endless["n"])
+                self.save.data["endless_best"] = best
+            self.save.write()
+        if not p.demo:
+            self.check_achievements(w, ok, ending)
+        self.result = {"idx": p.idx, "saved": w.saved, "total": w.total, "need": w.level.to_save, "ok": ok, "stars": stars,
+                       "record": record,
                        "log": p.log, "demo": p.demo, "saved_file": None, "notes": list(w.notes), "verse": verse,
                        "peso": w.peso, "peso0": p.camp.peso, "maestro": w.maestro_saved, "ending": ending, "t": 0}
         self.mode = "result"
@@ -5994,10 +6140,13 @@ class App:
                 self.update_play(dt)
             self.screen.fill((8, 6, 8))
             getattr(self, f"draw_{self.mode}")()
+            if self.toasts:
+                self.draw_toasts()
             pygame.display.flip()
 
     # ── título ───────────────────────────────────────────────────────────
-    MENU = ["Comenzar el viaje", "La Commedia (mapa)", "Pagine salvate", "Códice histórico", "Opciones", "Salir"]
+    MENU = ["Comenzar el viaje", "La Commedia (mapa)", "Giudizio del giorno", "Infinito", "Pagine salvate", "Logros",
+            "Códice histórico", "Opciones", "Salir"]
 
     def on_title(self, ev):
         if ev.type == pygame.KEYDOWN:
@@ -6031,19 +6180,122 @@ class App:
             case 1:
                 self.mode = "map"
             case 2:
-                self.mode = "pagine"
+                self.start_daily()
             case 3:
+                self.endless = {"n": 0, "seed": random.randrange(10**9)}
+                self.next_endless()
+            case 4:
+                self.mode = "pagine"
+            case 5:
+                self.scroll = 0
+                self.mode = "logros"
+            case 6:
                 self.scroll = 0
                 self.mode = "codex"
-            case 4:
+            case 7:
                 self.opt_sel = 0
                 self.mode = "options"
-            case 5:
+            case 8:
                 return "quit"
         return None
 
+    # ── modos ────────────────────────────────────────────────────────────
+    def start_daily(self) -> None:
+        """Giudizio del giorno: un nivel nuevo cada día, el mismo para todos, con su récord."""
+        today = datetime.date.today()
+        name = f"Giudizio del {today.isoformat()}"
+        make_variant(DAILY_ID, today.toordinal() * 7919, name)
+        self.open_preview(DAILY_ID)
+
+    def next_endless(self) -> None:
+        """Infinito: niveles generados uno tras otro hasta que falle la Compagnia."""
+        assert self.endless is not None
+        n = self.endless["n"]
+        lid = ENDLESS_ID + n
+        CUSTOM.pop(lid - 1, None)
+        make_variant(lid, self.endless["seed"] + n * 104729, f"Infinito · círculo {n + 1}")
+        self.open_preview(lid)
+
+    # ── logros ───────────────────────────────────────────────────────────
+    def check_achievements(self, w: World, ok: bool, ending: str | None) -> None:
+        got = self.save.data.setdefault("ach", [])
+        best = self.save.data.get("best", {})
+        conds = {
+            "primo": ok and w.level.id == 0,
+            "michelangelo": w.child_saved,
+            "tutti": ok and w.saved >= w.total,
+            "riveder": ok and w.level.id == 34,
+            "leggero": ok and w.level.id == 67 and w.peso == 0,
+            "palle": w.combo_hit,
+            "medico": w.cured >= 30,
+            "dioneo": w.dioneo_used,
+            "dies": w.nuking,
+            "maestro": w.maestro_saved,
+            "pagine10": len(self.save.data["pagine"]) >= 10,
+            "pagine101": len(self.save.data["pagine"]) >= N_LEVELS,
+            "stelle": sum(1 for v in best.values() if v.get("stars") == 3) >= 10,
+            "giudizio": ok and w.level.id == DAILY_ID,
+            "infinito": bool(self.endless) and self.endless["n"] >= 5,
+            "rosa": ending == "rosa", "limbo": ending == "limbo", "giorni": ending == "giorni",
+        }
+        for k, v in conds.items():
+            if v and k not in got:
+                got.append(k)
+                self.toasts.append([ACHIEVEMENTS[k][0], 5 * 60])
+                self.sfx.play("combo")
+        self.save.write()
+
+    def stars(self, x: float, y: float, n: int, r: float, total: int = 3) -> None:
+        """Estrellas dibujadas (no todas las fuentes tienen ★)."""
+        s = self.s
+        for k in range(total):
+            cx, cy = (x + k * r * 2.6) * s, y * s
+            pts = []
+            for j in range(10):
+                rr = r * s if j % 2 == 0 else r * s * 0.45
+                a = -math.pi / 2 + j * math.pi / 5
+                pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+            if k < n:
+                pygame.draw.polygon(self.screen, GOLD, pts)
+            pygame.draw.polygon(self.screen, GOLD_D, pts, 1)
+
+    def draw_toasts(self) -> None:
+        y = LH - 92
+        for t in self.toasts:
+            t[1] -= 1
+            a = min(255, t[1] * 6)
+            self.panel(LW / 2 - 150, y, 300, 22, min(220, a))
+            self.text(f"Logro: {t[0]}" if not t[0].startswith("foto") else t[0], self.f_med, (LW / 2, y + 5), GOLD, center=True, alpha=a)
+            y -= 26
+        self.toasts = [t for t in self.toasts if t[1] > 0]
+
+    def on_logros(self, ev):
+        if ev.type == pygame.KEYDOWN or (ev.type == pygame.MOUSEBUTTONDOWN and ev.button in (1, 3)):
+            self.mode = "title"
+        return None
+
+    def draw_logros(self) -> None:
+        bg = cached_gradient(LW * self.s, LH * self.s, (30, 22, 18), (10, 6, 6))
+        self.screen.blit(bg, (0, 0))
+        got = set(self.save.data.get("ach", []))
+        self.text(f"LOGROS — {len(got)} de {len(ACHIEVEMENTS)}", self.f_title, (LW / 2, 8), GOLD, center=True)
+        best = self.save.data.get("best", {})
+        stars = sum(v.get("stars", 0) for v in best.values())
+        self.text(f"Estrellas: {stars} de {3 * N_LEVELS}  ·  Mejor racha en Infinito: {self.save.data.get('endless_best', 0)}",
+                  self.f_small, (LW / 2, 34), UI_DIM, center=True)
+        for k, (key, (name, desc)) in enumerate(ACHIEVEMENTS.items()):
+            col, row = k % 2, k // 2
+            x, y = 24 + col * 304, 52 + row * 32
+            on = key in got
+            self.panel(x, y, 292, 28, 200 if on else 120, GOLD if on else GOLD_D)
+            if on:
+                self.stars(x + 12, y + 8, 1, 4)
+            self.text(name, self.f_med, (x + 20, y + 2), UI_ACC if on else UI_DIM)
+            self.text(desc, self.f_tiny, (x + 8, y + 16), UI_FG if on else UI_DIM)
+        self.text("Cualquier tecla: volver", self.f_tiny, (LW / 2, 348), UI_DIM, center=True)
+
     # ── opciones ─────────────────────────────────────────────────────────
-    OPTS = ["music", "voices", "lang", "quality", "volume", "fullscreen", "back"]
+    OPTS = ["music", "voices", "lang", "quality", "volume", "fullscreen", "motion", "markers", "contrast", "shadows", "back"]
 
     def on_options(self, ev):
         if ev.type != pygame.KEYDOWN and not (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1):
@@ -6051,7 +6303,7 @@ class App:
         o = self.save.opts
         key = getattr(ev, "key", pygame.K_RETURN)
         if ev.type == pygame.MOUSEBUTTONDOWN:
-            k = int((ev.pos[1] / self.s - 110) // 22)
+            k = int((ev.pos[1] / self.s - 92) // 20)
             if 0 <= k < len(self.OPTS):
                 self.opt_sel = k
         if key == pygame.K_ESCAPE:
@@ -6079,6 +6331,8 @@ class App:
                 o["lang"] = self.lang
             case "quality":
                 o["quality"] = self.quality = 0 if self.quality else 2
+            case "motion" | "markers" | "contrast" | "shadows":
+                o[item] = not o[item]
             case "volume":
                 o["volume"] = max(0, min(10, o["volume"] + delta))
                 self.sfx.set_volume(o["volume"] / 10)
@@ -6098,7 +6352,7 @@ class App:
         dim.fill((0, 0, 0, 140))
         self.screen.blit(dim, (0, 0))
         o = self.save.opts
-        self.text("OPCIONES", self.f_title, (LW / 2, 60), GOLD, center=True)
+        self.text("OPCIONES", self.f_title, (LW / 2, 50), GOLD, center=True)
         vals = {
             "music": ("Música", "sí" if o["music"] else "no"),
             "voices": ("Voces (recitado en italiano)", "sí" if o["voices"] else "no"),
@@ -6106,10 +6360,14 @@ class App:
             "quality": ("Luz y bloom", "alta" if self.quality else "baja"),
             "volume": ("Volumen", "▮" * o["volume"] + "▯" * (10 - o["volume"])),
             "fullscreen": ("Pantalla completa", "sí" if self.fullscreen else "no"),
+            "motion": ("Movimiento (temblor, grano)", "sí" if o["motion"] else "reducido"),
+            "markers": ("Iconos de enfermedad", "sí" if o["markers"] else "no"),
+            "contrast": ("Alto contraste", "sí" if o["contrast"] else "no"),
+            "shadows": ("Sombras de los oficios", "sí" if o["shadows"] else "no"),
             "back": ("Volver", ""),
         }
         for k, item in enumerate(self.OPTS):
-            y = 110 + k * 22
+            y = 92 + k * 20
             sel = k == self.opt_sel
             name, val = vals[item]
             if sel:
@@ -6313,13 +6571,17 @@ class App:
             pygame.draw.circle(scr, col, (int(x * s), int(y * s)), int(r * s))
             if i in self.save.data["pagine"]:
                 pygame.draw.circle(scr, (255, 250, 220), (int(x * s), int(y * s)), int(1 * s))
+            if self.save.best(i).get("stars") == 3:
+                pygame.draw.circle(scr, GOLD, (int(x * s), int(y * s)), int((r + 1.5) * s), 1)
             if i == self.sel:
                 pulse = 5 + math.sin(self.frame * 0.15) * 1.5
                 pygame.draw.circle(scr, (255, 255, 255), (int(x * s), int(y * s)), int(pulse * s), 1)
         lv = get_level(self.sel)
         self.panel(150, 326, 340, 32, 220)
         st = done.get(str(self.sel))
-        stat = f"  ·  salvadas {st['saved']}/{st['total']}" if st else ""
+        b = self.save.best(self.sel)
+        stat = f"  ·  récord {b['saved']}/100 ({b.get('stars', 0)}/3 estrellas)" if b else ""
+        del st
         lock = "  (bloqueado)" if self.sel > self.unlocked else ""
         self.text(f"{self.sel} · {lv.place} — {lv.canto}{lock}", self.f_med, (320, 328), UI_ACC, center=True)
         self.text(f"«{lv.name}» · {lv.difficulty} · Giornata {roman(lv.giornata + 1)} ({GIORNATE[lv.giornata][0]}){stat}",
@@ -6416,6 +6678,10 @@ class App:
         sh = ", ".join(PALLE_INFO[p][0] for p in w.shield) or "vacío"
         self.text(f"Escudo de {SHIELD_OWNER[lv.cantica]} ({len(w.shield)}/{w.slots}): {sh}  ·  Peso {w.peso}",
                   self.f_small, (LW / 2, 306), (230, 220, 200), center=True)
+        b = self.save.best(idx)
+        if b:
+            self.text(f"Tu récord: {b['saved']} almas", self.f_small, (LW / 2 - 20, 320), GOLD, center=True)
+            self.stars(LW / 2 + 40, 325, b.get("stars", 0), 4)
         self.text("Enter o clic: empezar · V: ver la solución · Esc: mapa", self.f_tiny, (LW / 2, 340), UI_DIM, center=True)
 
     # ── partida ──────────────────────────────────────────────────────────
@@ -6466,7 +6732,18 @@ class App:
             elif k in (pygame.K_SPACE, pygame.K_p):
                 p.paused = not p.paused
             elif k == pygame.K_f:
-                p.ff = not p.ff
+                p.speed = {1: 2, 2: 4, 4: 8, 8: 1}.get(p.speed if p.ff else 1, 2)
+                p.ff = p.speed > 1
+            elif k == pygame.K_BACKSPACE and not p.demo:
+                self.rewind()
+            elif k == pygame.K_PERIOD and p.paused:
+                self.step_once()
+            elif k == pygame.K_F5 and not p.demo:
+                self.start_play(p.idx)
+            elif k == pygame.K_h:
+                self.hide_hud = not self.hide_hud
+            elif k == pygame.K_F12:
+                self.photo()
             elif k == pygame.K_m:
                 self.sfx.toggle(THEMES[w.level.theme].music)
             elif k == pygame.K_n:
@@ -6664,13 +6941,53 @@ class App:
         p.acc = min(p.acc + dt, 250)
         while p.acc >= TICK_MS:
             p.acc -= TICK_MS
-            for _ in range(4 if p.ff else 1):
+            for _ in range(p.speed if p.ff else 1):
                 if w.done:
                     break
-                if p.pilot:
-                    p.pilot.step(w, self.apply)
-                w.tick()
-                self.drain_events()
+                self.step_once()
+                w = p.world
+
+    def step_once(self) -> None:
+        """Un tick de simulación, con la instantánea para rebobinar cada dos segundos."""
+        p = self.p
+        assert p is not None
+        w = p.world
+        if w.done:
+            return
+        if not p.demo and w.tick_count % (2 * TPS) == 0 and (not p.snaps or p.snaps[-1][0] != w.tick_count):
+            p.snaps.append((w.tick_count, w.snapshot(), len(p.log)))
+        if p.pilot:
+            p.pilot.step(w, self.apply)
+        w.tick()
+        self.drain_events()
+
+    def rewind(self) -> None:
+        """Vuelve unos tres segundos atrás. Lo hecho después se borra del registro."""
+        p = self.p
+        assert p is not None
+        now = p.world.tick_count
+        while p.snaps and p.snaps[-1][0] > now - 3 * TPS and len(p.snaps) > 1:
+            p.snaps.pop()
+        if not p.snaps:
+            return
+        tick, snap, nlog = p.snaps[-1]
+        w = World.thaw(snap)
+        p.world = w
+        p.renderer.world = w
+        p.renderer.fx = FX()
+        p.renderer.sync(full=True)
+        del p.log[nlog:]
+        p.rewinds += 1
+        p.end_wait = 0
+        self.sfx.play("lume")
+
+    def photo(self) -> None:
+        path = Path.cwd() / f"dantes_hell_{datetime.datetime.now():%Y%m%d_%H%M%S}.png"
+        try:
+            pygame.image.save(self.screen, str(path))
+            self.toasts.append([f"foto guardada: {path.name}", 3 * 60])
+        except (OSError, pygame.error):
+            pass
 
     def draw_play(self) -> None:
         p = self.p
@@ -6687,13 +7004,19 @@ class App:
             col = (255, 255, 255) if p.armed is None else PALLE_INFO[w.shield[p.armed]][2] if p.armed < len(w.shield) else (255, 255, 255)
             if hover is not None and p.armed is None:
                 pygame.draw.rect(self.view, col, (hover.x - 6 - cam, w.rmid(hover) - 8, 13, 15), 1)
+                if self.save.opts["shadows"] and w.can_assign(hover, p.skill):
+                    for k_, (sx, sy) in enumerate(skill_shadow(w, hover, p.skill)):
+                        if (k_ + self.frame // 4) % 3 == 0:
+                            self.view.fill((255, 255, 210), (sx - cam, sy, 1, 1))
             elif p.armed is not None:
                 pygame.draw.circle(self.view, col, (vx, y), 10 + int(2 * math.sin(self.frame * 0.3)), 1)
                 pygame.draw.circle(self.view, col, (vx, y), 2)
             else:
                 for a, b in (((-5, 0), (-2, 0)), ((2, 0), (5, 0)), ((0, -5), (0, -2)), ((0, 2), (0, 5))):
                     pygame.draw.line(self.view, col, (vx + a[0], y + a[1]), (vx + b[0], y + b[1]))
-        self.blit_view(p.renderer.fx.shake)
+        self.blit_view(p.renderer.fx.shake if self.save.opts["motion"] else 0)
+        if self.hide_hud:  # modo foto
+            return
         self.draw_hud(hover, count)
         self.draw_panel()
 
@@ -6721,7 +7044,9 @@ class App:
         if p.paused:
             flags.append("PAUSA")
         if p.ff:
-            flags.append("» ×4")
+            flags.append(f"» ×{p.speed}")
+        if p.rewinds:
+            flags.append(f"⟲ {p.rewinds}")
         if w.night:
             flags.append("NOCHE: no se sube")
         if w.combo:
@@ -6735,8 +7060,9 @@ class App:
         if flags:
             self.text("   ".join(flags), self.f_small, (LW / 2, 4), UI_ACC, center=True)
         if p.paused:
-            self.panel(140, 100, 360, 110, 210)
-            rows = ["1–9 / rueda: oficio · clic: asignar · ←→ / bordes / minimapa: cámara",
+            self.panel(110, 100, 420, 124, 210)
+            rows = ["Retroceso: rebobinar 3 s · «.»: un paso · F: ×1/×2/×4/×8 · F5: reiniciar · H: ocultar HUD · F12: foto",
+                    "1–9 / rueda: oficio · clic: asignar · ←→ / bordes / minimapa: cámara",
                     "Q W E R T Y U I: armar palla · clic: usarla · clic derecho: lanzar naranja",
                     "Mayús + tecla: devolver palla (avaros) · D: Privilegio di Dioneo",
                     "+ / −: cadenza · F: avance ×4 · Supr 2 s (o N dos veces): Dies Irae",
@@ -6936,6 +7262,16 @@ class App:
                 self.ending = {"kind": r["ending"], "t": 0}
                 self.mode = "ending"
                 return None
+            if r["idx"] >= ENDLESS_ID and self.endless is not None:
+                if r["ok"]:
+                    self.next_endless()
+                else:
+                    self.endless = None
+                    self.mode = "title"
+                return None
+            if r["idx"] == DAILY_ID:
+                self.mode = "title"
+                return None
             nxt = r["idx"] + 1 if r["ok"] and not r["demo"] else r["idx"]
             if nxt >= N_LEVELS and r["idx"] < N_LEVELS or r["idx"] >= N_LEVELS and r["ok"]:
                 self.mode = "map"
@@ -6964,6 +7300,13 @@ class App:
         big = "Salvados" if r["ok"] else "No bastan"
         self.text(f"{big}: {pct} %", self.f_title, (LW / 2, 62), UI_OK if r["ok"] else UI_BAD, center=True)
         self.text(f"Hacía falta el {need} %  ·  {r['saved']} de {r['total']} (mínimo {r['need']})", self.f_med, (LW / 2, 92), center=True)
+        if r.get("stars"):
+            self.stars(LW / 2 + 112, 74, r["stars"], 6)
+            if r.get("record"):
+                self.text("¡récord!", self.f_small, (LW / 2 + 110, 84), GOLD)
+        if r["idx"] >= ENDLESS_ID and self.endless is not None:
+            self.text(f"Infinito: racha {self.endless['n']} · mejor {self.save.data.get('endless_best', 0)}",
+                      self.f_small, (LW / 2, 300), UI_ACC, center=True)
         if r["saved"] == r["total"]:
             msg = "Ni una sola alma perdida. Filomena llora de alegría."
         elif r["ok"]:
@@ -7130,6 +7473,37 @@ def p_marks(i: int) -> int | None:
     cornici = [(42, 45), (46, 48), (49, 51), (52, 54), (55, 57), (58, 60), (61, 63)]
     done = sum(1 for lo, hi in cornici if i > hi)
     return max(0, 7 - done)
+
+
+ACHIEVEMENTS = {
+    "primo": ("Primo passo", "Sacar a la Compagnia de Florencia, 1348."),
+    "michelangelo": ("Il bambino", "Salvar al niño huérfano de la peste."),
+    "tutti": ("Nessuno perduto", "Salvar a las 100 almas de un nivel."),
+    "riveder": ("A riveder le stelle", "Salir del Infierno por la natural burella."),
+    "leggero": ("Puro e disposto", "Terminar el Purgatorio con Peso 0."),
+    "palle": ("Palle, palle, palle!", "Coger tres palle en diez segundos."),
+    "medico": ("Cosme y Damián", "Curar a 30 almas en un nivel."),
+    "dioneo": ("Il privilegio", "Usar el Privilegio de Dioneo."),
+    "dies": ("Dies irae", "Rendirse con el botón humillante."),
+    "maestro": ("Il Maestro arriva", "Que el Maestro llegue vivo a una salida."),
+    "pagine10": ("Dieci pagine", "Salvar diez pagine de la hoguera."),
+    "pagine101": ("La biblioteca", "Salvar las 101 pagine."),
+    "stelle": ("Dieci volte tre", "Tres estrellas en diez niveles."),
+    "giudizio": ("Giudizio del giorno", "Superar un desafío diario."),
+    "infinito": ("Senza fine", "Superar cinco círculos seguidos en Infinito."),
+    "rosa": ("La candida rosa", "Ver el final I."),
+    "limbo": ("Il nobile castello", "Ver el final II."),
+    "giorni": ("Trentatré giorni e mezzo", "Ver el final III."),
+}
+
+
+def level_stars(saved: int, need: int, total: int) -> int:
+    """★ superado · ★★ a medio camino entre el mínimo y todos · ★★★ ni una sola alma perdida."""
+    if saved < need:
+        return 0
+    if saved >= total:
+        return 3
+    return 2 if saved >= (need + total) / 2 else 1
 
 
 def roman(n: int) -> str:
@@ -7488,6 +7862,39 @@ def selftest(quick: bool = False) -> int:
     check("un nivel exportado a JSON y vuelto a leer se juega igual", (w1.saved, w1.tick_count) == (w2.saved, w2.tick_count),
           f"{w1.saved}/{w1.tick_count} vs {w2.saved}/{w2.tick_count}")
 
+    print("Rebobinado y niveles generados:")
+    lv = get_level(13)
+    wa = World(lv)
+    pa = Autopilot(lv.solution)
+    log: list = []
+
+    def ap(cmd, w=wa):
+        ok = w.do(cmd)
+        if ok:
+            log.append([w.tick_count, *cmd])
+        return ok
+    for _ in range(600):
+        pa.step(wa, ap)
+        wa.tick()
+    snap = wa.snapshot()
+    for _ in range(900):
+        pa.step(wa, ap)
+        wa.tick()
+    wb = World.thaw(snap)
+    rest = Replay([c for c in log if c[0] >= 600])
+    for _ in range(900):
+        rest.step(wb, wb.do)
+        wb.tick()
+    check("rebobinar y rehacer da la misma partida", (wa.saved, wa.dead, int(wa.tn.k.sum())) == (wb.saved, wb.dead, int(wb.tn.k.sum())),
+          f"{wa.saved}/{wa.dead} vs {wb.saved}/{wb.dead}")
+    check("el marco del revés sobrevive al rebobinado", wb.ti.k.base is not None and wb.ti.k[0, 0] == wb.tn.k[-1, 0])
+    v = make_variant(DAILY_ID, 12345, "prueba")
+    wv, _ = simulate(DAILY_ID, Autopilot(v.solution))
+    CUSTOM.pop(DAILY_ID, None)
+    check("un Giudizio del giorno se puede resolver", wv.saved >= v.to_save, f"{wv.saved}/{v.to_save}")
+    check("las estrellas: ★ mínimo, ★★ a medio camino, ★★★ todas",
+          (level_stars(50, 60, 100), level_stars(60, 60, 100), level_stars(85, 60, 100), level_stars(100, 60, 100)) == (0, 1, 2, 3))
+
     print("La Commedia (solución de referencia en cada nivel):")
     idxs = range(N_LEVELS) if not quick else range(0, N_LEVELS, 10)
     for i in idxs:
@@ -7629,6 +8036,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all", action="store_true", help="desbloquear toda la Commedia")
     ap.add_argument("--export-levels", metavar="CARPETA", help="escribir los 101 niveles en JSON (formato del diseño)")
     ap.add_argument("--custom", metavar="NIVEL.json", help="jugar un nivel propio en JSON")
+    ap.add_argument("--daily", action="store_true", help="jugar el Giudizio del giorno")
+    ap.add_argument("--endless", action="store_true", help="modo Infinito")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest(args.quick)
@@ -7644,7 +8053,13 @@ def main(argv: list[str] | None = None) -> int:
         app.run()
         pygame.quit()
         return 0
-    App(args).run()
+    app = App(args)
+    if args.daily:
+        app.start_daily()
+    elif args.endless:
+        app.endless = {"n": 0, "seed": random.randrange(10**9)}
+        app.next_endless()
+    app.run()
     pygame.quit()
     return 0
 
